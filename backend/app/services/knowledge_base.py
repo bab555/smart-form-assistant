@@ -274,7 +274,7 @@ class VectorStoreService:
         category: Optional[str] = None
     ) -> Tuple[str, float, bool, Optional[List[str]]]:
         """
-        校准文本 - 核心功能
+        校准文本 - 核心功能（向量检索 + Turbo 二次确认）
         
         Args:
             raw_text: OCR/ASR识别的原始文本
@@ -284,42 +284,127 @@ class VectorStoreService:
             Tuple[标准文本, 置信度, 是否歧义, 候选列表]
         """
         try:
-            # 向量检索
+            # Step 1: 向量检索找候选项
             results = await self.search(raw_text, top_k=5, category=category)
             
             if not results:
-                # 没有找到匹配项
+                # 没有找到匹配项，返回原文
+                logger.info(f"[校准] 未找到匹配: {raw_text}")
                 return raw_text, 0.0, False, None
             
             # 获取最佳匹配
             best_match = results[0]
             best_score = best_match['combined_score']
             
-            # 检查歧义
-            is_ambiguous = False
+            # Step 2: 检查是否需要二次确认
+            need_llm_confirm = False
             candidates = None
             
             if len(results) >= 2:
                 second_match = results[1]
                 score_diff = best_score - second_match['combined_score']
                 
-                # 如果Top2的分数差异很小，认为存在歧义
+                # 如果 Top2 的分数差异很小，需要 LLM 二次确认
                 if score_diff < settings.AMBIGUITY_THRESHOLD:
-                    is_ambiguous = True
-                    candidates = [r['text'] for r in results[:3]]  # 返回前3个候选
-                    logger.info(f"检测到歧义: {raw_text} -> {candidates}")
+                    need_llm_confirm = True
+                    candidates = [r['text'] for r in results[:3]]
+                    logger.info(f"[校准] 需要 LLM 二次确认: {raw_text} -> 候选: {candidates}")
             
-            # 计算置信度
+            # 如果置信度不够高，也需要二次确认
+            if best_score < 0.85:
+                need_llm_confirm = True
+                if not candidates:
+                    candidates = [r['text'] for r in results[:3]]
+            
+            # Step 3: Turbo 模型二次确认（核心流程）
+            if need_llm_confirm and candidates:
+                llm_result = await self._llm_calibrate(raw_text, candidates, category)
+                
+                if llm_result:
+                    final_text, llm_confidence, is_ambiguous = llm_result
+                    # LLM 确认后的置信度 = 向量分数 * LLM置信度
+                    final_confidence = min(best_score * llm_confidence, 1.0)
+                    
+                    logger.info(f"[校准] LLM 确认: {raw_text} -> {final_text} (置信度: {final_confidence:.2f})")
+                    return final_text, final_confidence, is_ambiguous, candidates if is_ambiguous else None
+            
+            # 向量检索置信度足够高，直接返回
             confidence = min(best_score, 1.0)
+            logger.info(f"[校准] 向量匹配: {raw_text} -> {best_match['text']} (置信度: {confidence:.2f})")
             
-            logger.info(f"校准结果: {raw_text} -> {best_match['text']} (置信度: {confidence:.2f})")
-            
-            return best_match['text'], confidence, is_ambiguous, candidates
+            return best_match['text'], confidence, False, None
             
         except Exception as e:
             logger.error(f"文本校准失败: {str(e)}")
             # 失败时返回原文
             return raw_text, 0.5, False, None
+    
+    async def _llm_calibrate(
+        self,
+        raw_text: str,
+        candidates: List[str],
+        category: Optional[str] = None
+    ) -> Optional[Tuple[str, float, bool]]:
+        """
+        使用 Turbo 模型进行二次校对确认
+        
+        Args:
+            raw_text: 原始识别文本
+            candidates: 候选项列表
+            category: 类别提示
+            
+        Returns:
+            Tuple[最终文本, 置信度, 是否仍有歧义] 或 None
+        """
+        try:
+            category_hint = f"（类别：{category}）" if category else ""
+            candidates_str = "\n".join([f"{i+1}. {c}" for i, c in enumerate(candidates)])
+            
+            prompt = f"""你是一个商品名称校对助手。请根据 OCR/语音识别的原始文本，从候选列表中选择最匹配的标准名称。
+
+原始文本："{raw_text}"{category_hint}
+
+候选列表：
+{candidates_str}
+
+请分析并返回 JSON 格式：
+{{"choice": 选择的序号(1-{len(candidates)}), "confidence": 置信度(0-1), "reason": "简短理由"}}
+
+如果所有候选都不匹配，返回：{{"choice": 0, "confidence": 0, "reason": "无匹配"}}
+
+只返回 JSON，不要其他内容。"""
+
+            response = await llm_service.call_calibration_model(prompt)
+            
+            # 解析 LLM 返回
+            import json
+            import re
+            
+            # 提取 JSON
+            json_match = re.search(r'\{[^}]+\}', response)
+            if json_match:
+                result = json.loads(json_match.group())
+                choice = result.get('choice', 0)
+                confidence = result.get('confidence', 0.5)
+                
+                if choice > 0 and choice <= len(candidates):
+                    final_text = candidates[choice - 1]
+                    # 置信度低于 0.7 认为仍有歧义
+                    is_ambiguous = confidence < 0.7
+                    
+                    logger.info(f"[LLM校对] {raw_text} -> {final_text} (置信度: {confidence}, 理由: {result.get('reason', '')})")
+                    return final_text, confidence, is_ambiguous
+                else:
+                    # LLM 认为都不匹配
+                    logger.info(f"[LLM校对] {raw_text} -> 无匹配，保留原文")
+                    return raw_text, 0.3, True
+            
+            logger.warning(f"[LLM校对] 解析失败: {response}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"LLM 校对失败: {str(e)}")
+            return None
 
 
 # 全局单例

@@ -19,7 +19,11 @@ const apiClient: AxiosInstance = axios.create({
 // 请求拦截器：将 camelCase 转换为 snake_case
 apiClient.interceptors.request.use(
   (config) => {
-    if (config.data && typeof config.data === 'object') {
+    // 处理 FormData：删除默认 Content-Type，让浏览器自动设置 multipart/form-data
+    if (config.data instanceof FormData) {
+      delete config.headers['Content-Type']
+    } else if (config.data && typeof config.data === 'object') {
+      // 非 FormData 的对象数据，转换 key 为 snake_case
       config.data = keysToSnake(config.data)
     }
     return config
@@ -53,11 +57,14 @@ export const api = {
   /**
    * 上传图片并识别
    */
-  async recognizeImage(file: File, templateId?: string): Promise<ApiResponse<RecognitionResult>> {
+  async recognizeImage(file: File, templateId?: string, clientId?: string): Promise<ApiResponse<RecognitionResult>> {
     const formData = new FormData()
     formData.append('file', file)
     if (templateId) {
       formData.append('template_id', templateId)
+    }
+    if (clientId) {
+      formData.append('client_id', clientId)
     }
 
     const { data } = await apiClient.post<ApiResponse<RecognitionResult>>(
@@ -65,7 +72,7 @@ export const api = {
       formData,
       {
         headers: {
-          'Content-Type': 'multipart/form-data',
+          // 不手动设置 Content-Type，让浏览器自动处理 boundary
         },
       }
     )
@@ -77,17 +84,21 @@ export const api = {
    */
   async recognizeAudio(
     audioBlob: Blob,
-    context?: Record<string, any>
+    context?: Record<string, any>,
+    clientId?: string
   ): Promise<ApiResponse<any>> {
     const formData = new FormData()
     formData.append('file', audioBlob, 'audio.wav')
     if (context) {
       formData.append('context', JSON.stringify(keysToSnake(context)))
     }
+    if (clientId) {
+      formData.append('client_id', clientId)
+    }
 
     const { data } = await apiClient.post<ApiResponse<any>>('/workflow/audio', formData, {
       headers: {
-        'Content-Type': 'multipart/form-data',
+        // 让浏览器自动处理
       },
     })
     return data
@@ -116,7 +127,58 @@ export const api = {
     const { data } = await apiClient.post<ApiResponse<any>>('/form/submit', formData)
     return data
   },
+
+  /**
+   * 上传文档并提取数据（支持 Excel/Word/PPT/PDF/图片）
+   */
+  async extractDocument(file: File, templateId?: string, clientId?: string): Promise<ApiResponse<DocumentExtractResult>> {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (templateId) {
+      formData.append('template_id', templateId)
+    }
+    if (clientId) {
+      formData.append('client_id', clientId)
+    }
+
+    const { data } = await apiClient.post<ApiResponse<DocumentExtractResult>>(
+      '/document/extract',
+      formData,
+      {
+        headers: {
+          // 让浏览器自动处理
+        },
+        timeout: 180000, // 文档处理+校准可能较慢，超时3分钟
+      }
+    )
+    return data
+  },
+
+  /**
+   * 获取支持的文档类型
+   */
+  async getSupportedDocumentTypes(): Promise<SupportedTypesResult> {
+    const { data } = await apiClient.get<SupportedTypesResult>('/document/supported-types')
+    return data
+  },
+}
+
+// 文档提取结果类型
+export interface DocumentExtractResult {
+  success: boolean
+  fileType: string
+  rows: any[][]
+  rowCount: number
+  message: string
+  ambiguousItems?: any[]
+  rawColumns?: string[]
+  pageCount?: number
+}
+
+// 支持的文档类型
+export interface SupportedTypesResult {
+  supportedTypes: Record<string, string[]>
+  allExtensions: string[]
 }
 
 export default apiClient
-

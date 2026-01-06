@@ -1,7 +1,9 @@
 """
 智能表单助手 - FastAPI 主程序
 """
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import uvicorn
@@ -31,6 +33,17 @@ app = FastAPI(
     redoc_url="/redoc",
     lifespan=lifespan
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """请求验证异常处理"""
+    logger.error(f"参数验证失败: {exc.errors()}")
+    logger.error(f"请求体: {await request.body()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "message": "请求参数验证失败"},
+    )
 
 
 # ========== CORS 配置 ==========

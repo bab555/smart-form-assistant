@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     CONFIDENCE_THRESHOLD_HIGH: float = 0.85
     CONFIDENCE_THRESHOLD_LOW: float = 0.60
     AMBIGUITY_THRESHOLD: float = 0.10
+    LLM_REQUEST_TIMEOUT: int = 120  # LLM 请求超时（秒）
+    CALIBRATION_TIMEOUT: int = 180  # 校准流程总超时（秒）
     
     # ========== CORS 配置 ==========
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"

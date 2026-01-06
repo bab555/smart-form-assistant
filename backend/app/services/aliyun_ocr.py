@@ -49,7 +49,7 @@ class AliyunOCRService:
                     "role": "user",
                     "content": [
                         {"image": image_input},
-                        {"text": "请识别这张图片中的所有文字内容。请直接输出识别到的文字，保持原有格式和换行，不要添加任何解释或说明。"}
+                        {"text": "请识别这张图片中的所有内容。如果包含表格或列表，请直接输出为 Markdown 表格格式。如果是键值对（如表单），也请整理为 Markdown 表格。保持原有内容的完整性。"}
                     ]
                 }
             ]

@@ -48,7 +48,7 @@ export default function InputArea({ onSendMessage }: InputAreaProps) {
             className="flex items-center gap-2 px-4 py-2 bg-success text-white rounded-lg hover:bg-green-600 transition-colors"
           >
             <Upload size={18} />
-            <span className="text-sm font-medium">上传图片</span>
+            <span className="text-sm font-medium">上传文件</span>
           </button>
         </div>
 

@@ -95,27 +95,41 @@ class AliyunLLMService:
     
     async def call_vl_model(
         self,
-        image_url: str,
-        prompt: str = "请识别图片中的文字内容，保持原有格式"
+        image_url: Optional[str] = None,
+        prompt: str = "请识别图片中的文字内容，保持原有格式",
+        image_data: Optional[bytes] = None
     ) -> str:
         """
         调用视觉语言模型（Qwen-VL）
         
         Args:
-            image_url: 图片URL或base64
+            image_url: 图片URL
             prompt: 提示词
+            image_data: 图片二进制数据（如果提供，将优先使用，转为base64）
             
         Returns:
             str: 识别结果
         """
         try:
+            content_list = []
+            
+            if image_data:
+                import base64
+                base64_str = base64.b64encode(image_data).decode('utf-8')
+                # 默认使用 png 格式头，大多数情况下通用
+                final_image_url = f"data:image/png;base64,{base64_str}"
+                content_list.append({"image": final_image_url})
+            elif image_url:
+                content_list.append({"image": image_url})
+            else:
+                raise ValueError("必须提供 image_url 或 image_data")
+                
+            content_list.append({"text": prompt})
+            
             messages = [
                 {
                     "role": "user",
-                    "content": [
-                        {"image": image_url},
-                        {"text": prompt}
-                    ]
+                    "content": content_list
                 }
             ]
             
@@ -125,16 +139,39 @@ class AliyunLLMService:
             )
             
             if response.status_code == 200:
-                content = response.output.choices[0].message.content[0]["text"]
-                logger.info(f"VL模型识别成功，内容长度: {len(content)}")
-                return content
+                content = response.output.choices[0].message.content
+                if isinstance(content, list):
+                    # 处理返回列表的情况
+                    text_content = ""
+                    for item in content:
+                        if isinstance(item, dict) and "text" in item:
+                            text_content += item["text"]
+                elif isinstance(content, dict):
+                     text_content = content.get("text", "")
+                else:
+                    text_content = str(content) # 可能是纯字符串或者对象列表的第一个元素的 text 属性，视 SDK 版本
+                    # 针对旧版 SDK 或特定返回结构的防御性处理
+                    if hasattr(response.output.choices[0].message.content[0], "text"):
+                         text_content = response.output.choices[0].message.content[0]["text"]
+
+                # 清洗 Markdown 代码块
+                text_content = text_content.replace("```json", "").replace("```", "").strip()
+                
+                logger.info(f"VL模型识别成功，内容长度: {len(text_content)}")
+                return text_content
             else:
-                logger.error(f"VL模型调用失败: {response.code}")
+                logger.error(f"VL模型调用失败: {response.code} - {response.message}")
                 raise Exception(f"VL模型调用失败: {response.message}")
                 
         except Exception as e:
             logger.error(f"VL模型调用异常: {str(e)}")
             raise
+
+    async def call_multimodal_model(self, image_data: bytes, prompt: str) -> str:
+        """
+        调用多模态模型（content_analyzer 专用别名）
+        """
+        return await self.call_vl_model(image_data=image_data, prompt=prompt)
     
     async def get_embedding(
         self,

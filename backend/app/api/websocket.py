@@ -1,67 +1,42 @@
 """
 WebSocket 处理 - 实时推送 Agent 思考过程
 """
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from typing import Dict, Set
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from typing import Optional
 import json
 import asyncio
 from app.core.logger import app_logger as logger
 from app.agents.graph import agent_graph, AgentState
 from app.utils.helpers import generate_trace_id
+from app.core.connection_manager import manager
 from datetime import datetime, timezone
 
 
 router = APIRouter()
 
 
-class ConnectionManager:
-    """WebSocket 连接管理器"""
-    
-    def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
-    
-    async def connect(self, websocket: WebSocket):
-        """接受连接"""
-        await websocket.accept()
-        self.active_connections.add(websocket)
-        logger.info(f"WebSocket 连接建立，当前连接数: {len(self.active_connections)}")
-    
-    def disconnect(self, websocket: WebSocket):
-        """断开连接"""
-        self.active_connections.discard(websocket)
-        logger.info(f"WebSocket 连接断开，当前连接数: {len(self.active_connections)}")
-    
-    async def send_message(self, websocket: WebSocket, message: dict):
-        """发送消息到单个客户端"""
-        try:
-            await websocket.send_json(message)
-        except Exception as e:
-            logger.error(f"发送消息失败: {str(e)}")
-    
-    async def broadcast(self, message: dict):
-        """广播消息到所有客户端"""
-        for connection in self.active_connections:
-            await self.send_message(connection, message)
-
-
-manager = ConnectionManager()
-
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 @router.websocket("/agent")
-async def websocket_agent_endpoint(websocket: WebSocket):
+async def websocket_agent_endpoint(
+    websocket: WebSocket,
+    client_id: Optional[str] = Query(None)
+):
     """
     Agent WebSocket 端点 - 实时推送处理进度
     """
-    await manager.connect(websocket)
+    # 如果未提供 client_id，使用临时 ID
+    actual_client_id = client_id or f"anon_{generate_trace_id()}"
+    
+    await manager.connect(websocket, actual_client_id)
     
     try:
         while True:
             # 接收客户端消息
             data = await websocket.receive_text()
-            logger.info(f"收到 WebSocket 消息: {data[:100]}...")
+            logger.debug(f"收到 WebSocket 消息 from {actual_client_id}: {data[:100]}...")
             
             try:
                 message = json.loads(data)
@@ -73,6 +48,7 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                 
                 elif message_type == 'process_image':
                     # 处理图片（流式推送进度）
+                    # 注意：现在主要推荐使用 HTTP POST 上传，此路径仅作 Mock 或备用
                     await handle_image_stream(websocket, message)
                 
                 elif message_type == 'process_audio':
@@ -81,43 +57,27 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                 
                 else:
                     logger.warning(f"未知消息类型: {message_type}")
-                    await manager.send_message(websocket, {
-                        "type": "error",
-                        "code": 4001,
-                        "message": f"未知消息类型: {message_type}",
-                        "timestamp": _iso_now(),
-                    })
+                    # 不报错，只忽略
                     
             except json.JSONDecodeError:
                 logger.error("JSON 解析失败")
-                await manager.send_message(websocket, {
-                    "type": "error",
-                    "code": 4001,
-                    "message": "消息格式错误",
-                    "timestamp": _iso_now(),
-                })
     
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-        logger.info("客户端主动断开连接")
+        manager.disconnect(websocket, actual_client_id)
     
     except Exception as e:
         logger.error(f"WebSocket 错误: {str(e)}")
-        manager.disconnect(websocket)
+        manager.disconnect(websocket, actual_client_id)
 
 
 async def handle_image_stream(websocket: WebSocket, message: dict):
     """
-    处理图片识别（流式推送）
-    
-    Args:
-        websocket: WebSocket 连接
-        message: 客户端消息
+    处理图片识别（流式推送 - Mock/Legacy）
     """
     trace_id = generate_trace_id()
     
     try:
-        # 发送开始消息 (扁平化结构匹配前端)
+        # 发送开始消息
         await manager.send_message(websocket, {
             "type": "step_start",
             "content": "开始处理图片",
@@ -177,11 +137,7 @@ async def handle_image_stream(websocket: WebSocket, message: dict):
 
 async def handle_audio_stream(websocket: WebSocket, message: dict):
     """
-    处理语音命令（流式推送）
-    
-    Args:
-        websocket: WebSocket 连接
-        message: 客户端消息
+    处理语音命令（流式推送 - Mock/Legacy）
     """
     trace_id = generate_trace_id()
     
@@ -218,13 +174,13 @@ async def handle_audio_stream(websocket: WebSocket, message: dict):
         
         await asyncio.sleep(0.3)
         
-        # 发送工具调用 (关键修复: tool_call -> tool_action, args -> params)
+        # 发送工具调用
         await manager.send_message(websocket, {
             "type": "tool_action",
             "content": "调用表格更新工具",
             "tool": "update_cell",
             "params": {
-                "rowIndex": 0,  # 前端是 camelCase (useFormStore 逻辑可能需要检查，但通常 JS 传参习惯 camelCase)
+                "rowIndex": 0,
                 "key": "product_name",
                 "value": "红富士苹果"
             },

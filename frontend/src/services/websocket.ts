@@ -14,9 +14,12 @@ export class WebSocketClient {
   private reconnectDelay = 1000
   private messageHandlers: Set<MessageHandler> = new Set()
   private isManualClose = false
+  public readonly clientId: string
 
   constructor(url?: string) {
     this.url = url || import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws'
+    // 生成随机 Client ID
+    this.clientId = `client_${Math.random().toString(36).substring(2, 9)}_${Date.now()}`
   }
 
   /**
@@ -25,10 +28,11 @@ export class WebSocketClient {
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        this.ws = new WebSocket(`${this.url}/agent`)
+        // 带上 client_id 参数
+        this.ws = new WebSocket(`${this.url}/agent?client_id=${this.clientId}`)
 
         this.ws.onopen = () => {
-          console.log('WebSocket 连接成功')
+          console.log(`WebSocket 连接成功 (Client ID: ${this.clientId})`)
           this.reconnectAttempts = 0
           this.isManualClose = false
           this.sendPing()
@@ -146,4 +150,3 @@ export class WebSocketClient {
 
 // 导出单例
 export const wsClient = new WebSocketClient()
-
