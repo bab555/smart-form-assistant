@@ -55,6 +55,11 @@ async def websocket_agent_endpoint(
                     # 处理音频（流式推送进度）
                     await handle_audio_stream(websocket, message)
                 
+                elif message_type == 'chat':
+                    # 处理对话消息
+                    from app.agents.chat_handlers.chat_logic import handle_chat_message
+                    await handle_chat_message(websocket, message, actual_client_id)
+                
                 else:
                     logger.warning(f"未知消息类型: {message_type}")
                     # 不报错，只忽略
