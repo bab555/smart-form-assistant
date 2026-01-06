@@ -58,13 +58,26 @@ export default function ChatPanel() {
   // 监听 WebSocket 消息，更新聊天列表
   useEffect(() => {
     const unsubscribe = wsClient.subscribe((message) => {
+      // 处理语音转文字后的用户消息（显示为用户发送的内容）
+      if (message.type === 'user_voice_text' && message.content) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `voice-${Date.now()}`,
+            role: 'user',
+            content: `🎤 ${message.content}`, // 添加麦克风图标标识语音来源
+            timestamp: message.timestamp || new Date().toISOString(),
+          },
+        ])
+      }
+      
       // 处理 Agent 回复
       if (message.type === 'agent_thought' && message.content) {
-        // 避免一些流式消息的重复处理逻辑，这里暂时简化，每次收到都当做一条新消息
-        // 优化：如果是流式输出，应该更新最后一条消息。目前后端是整段返回，所以直接追加。
+        // 过滤掉 "正在思考..." 这种中间状态的消息
+        if (message.status === 'thinking') {
+          return
+        }
         
-        // 为了防止 React StrictMode 下的双重渲染导致消息重复，可以加个简单的 ID 检查或 timestamp 检查
-        // 但由于 message from WS 没有 ID，我们生成一个基于内容的 hash 或者简易 ID
         const msgId = `${Date.now()}-${message.content.length}`
         
         setMessages((prev) => [
@@ -85,7 +98,7 @@ export default function ChatPanel() {
           {
             id: `tool-${Date.now()}`,
             role: 'system', // 显示为系统通知
-            content: `正在执行操作：${message.content || message.tool}`,
+            content: `⚙️ ${message.content || '正在执行操作...'}`,
             timestamp: message.timestamp || new Date().toISOString(),
           },
         ])
@@ -98,7 +111,7 @@ export default function ChatPanel() {
           {
             id: `err-${Date.now()}`,
             role: 'assistant',
-            content: `出错啦：${message.content}`,
+            content: `❌ 出错啦：${message.content}`,
             timestamp: message.timestamp || new Date().toISOString(),
           },
         ])

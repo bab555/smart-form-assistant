@@ -7,6 +7,7 @@ import { useVoiceRecorder } from '@hooks/useVoiceRecorder'
 import { useMutation } from '@tanstack/react-query'
 import { api } from '@services/api'
 import { wsClient } from '@services/websocket'
+import { useFormStore } from '@hooks/useFormStore'
 
 interface VoiceInputProps {
   onClose: () => void
@@ -14,15 +15,20 @@ interface VoiceInputProps {
 
 export default function VoiceInput({ onClose }: VoiceInputProps) {
   const { recordingState, startRecording, stopRecording, cancelRecording } = useVoiceRecorder()
+  const { rows } = useFormStore()
 
   // 语音识别 Mutation
   const recognizeMutation = useMutation({
-    mutationFn: (audioBlob: Blob) => api.recognizeAudio(audioBlob),
+    mutationFn: (audioBlob: Blob) => {
+      // 传入当前表格数据作为上下文，以及 clientId
+      const context = { rows }
+      return api.recognizeAudio(audioBlob, context, wsClient.clientId)
+    },
     onSuccess: (response) => {
       console.log('语音识别成功:', response)
-      // 联调阶段：由后端通过 WebSocket 推送 tool_action 来驱动表格更新/可视化
-      // 注意：当前后端 WebSocket 的 process_audio 仍是 Mock 流程（用于打通端到端联调）
-      wsClient.send({ type: 'process_audio' })
+      // 注意：后端会通过 WebSocket 推送 tool_action 和 agent_thought
+      // 前端的 useAgent Hook 和 ChatPanel 会监听这些消息并更新 UI
+      // 这里不需要额外操作
       onClose()
     },
     onError: (error) => {
@@ -114,4 +120,3 @@ export default function VoiceInput({ onClose }: VoiceInputProps) {
     </div>
   )
 }
-
