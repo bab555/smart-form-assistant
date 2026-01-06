@@ -19,7 +19,7 @@ const SUPPORTED_TYPES = {
 }
 
 // 所有支持的 MIME 类型
-const ALL_SUPPORTED_TYPES = Object.values(SUPPORTED_TYPES).flat()
+// const ALL_SUPPORTED_TYPES = Object.values(SUPPORTED_TYPES).flat()
 
 // 最大文件大小 20MB
 const MAX_FILE_SIZE = 20 * 1024 * 1024

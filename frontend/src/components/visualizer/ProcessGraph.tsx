@@ -9,7 +9,6 @@ import ReactFlow, {
   Controls,
   useNodesState,
   useEdgesState,
-  MarkerType,
 } from 'reactflow'
 import 'reactflow/dist/style.css'
 import type { LogEntry } from '@types'
@@ -84,7 +83,7 @@ export default function ProcessGraph({ currentStep, logs }: ProcessGraphProps) {
 
   // 根据当前步骤更新节点样式
   useEffect(() => {
-    const currentIndex = STEPS_ORDER.indexOf(normalizedStep)
+    // const currentIndex = STEPS_ORDER.indexOf(normalizedStep)
     
     setNodes((nds) =>
       nds.map((node) => {
@@ -97,7 +96,7 @@ export default function ProcessGraph({ currentStep, logs }: ProcessGraphProps) {
         const isActive = normalizedStep === stepKey
         // const isPassed = currentIndex > -1 && STEPS_ORDER.indexOf(stepKey) < currentIndex // 暂时不需 passed 样式
 
-        let style: React.CSSProperties = {
+        const style: React.CSSProperties = {
           padding: '12px 24px',
           borderRadius: '16px',
           fontSize: '14px',

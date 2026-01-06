@@ -20,7 +20,7 @@ const ACCEPTED_TYPES = {
 }
 
 // 所有支持的 MIME 类型
-const ALL_ACCEPTED = Object.values(ACCEPTED_TYPES).flat().join(',')
+// const ALL_ACCEPTED = Object.values(ACCEPTED_TYPES).flat().join(',')
 
 // 文件扩展名
 const ACCEPTED_EXTENSIONS = '.jpg,.jpeg,.png,.gif,.webp,.bmp,.xlsx,.xls,.csv,.docx,.doc,.pptx,.ppt,.pdf'

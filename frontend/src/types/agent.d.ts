@@ -19,6 +19,7 @@ export type WSMessageType =
   | 'step_log'
   | 'step_end'
   | 'error'
+  | 'user_voice_text'
 
 /**
  * WebSocket 消息基础结构
@@ -35,6 +36,15 @@ export interface AgentThoughtMessage extends WSMessage {
   type: 'agent_thought'
   content: string
   step: AgentStep
+  status?: string
+}
+
+/**
+ * 用户语音转文字消息
+ */
+export interface UserVoiceTextMessage extends WSMessage {
+  type: 'user_voice_text'
+  content: string
 }
 
 /**
@@ -44,6 +54,7 @@ export interface ToolActionMessage extends WSMessage {
   type: 'tool_action'
   tool: string
   params: Record<string, any>
+  content?: string
 }
 
 /**
@@ -92,6 +103,7 @@ export type WebSocketMessage =
   | StepLogMessage
   | StepEndMessage
   | ErrorMessage
+  | UserVoiceTextMessage
   | WSMessage
 
 /**
@@ -110,4 +122,3 @@ export interface LogEntry {
   message: string
   type: 'info' | 'success' | 'warning' | 'error'
 }
-

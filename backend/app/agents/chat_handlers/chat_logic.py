@@ -4,9 +4,7 @@
 from fastapi import WebSocket
 from app.core.logger import app_logger as logger
 from app.services.aliyun_llm import llm_service
-from app.services.skill_registry import skill_registry
 from app.core.connection_manager import manager
-from app.agents.skills.form_skill import update_cell, update_table, mark_ambiguous
 import json
 from datetime import datetime, timezone
 import traceback
@@ -106,30 +104,30 @@ async def handle_chat_message(websocket: WebSocket, message: dict, client_id: st
                 tool_name = tool_call.get("tool")
                 params = tool_call.get("params", {})
                 
-                # 执行工具逻辑 (这里其实是返回指令给前端)
-                action_response = None
-                
                 if tool_name == "update_cell":
-                    # 调用 form_skill 中的逻辑生成指令
-                    action_response = update_cell(
-                        row_index=params.get("row_index"),
-                        key=params.get("key"),
-                        value=params.get("value")
-                    )
+                    row_index = params.get("row_index", 0)
+                    key = params.get("key", "")
+                    value = params.get("value", "")
+                    
+                    # 直接构造 action 数据发送给前端，不调用 LangChain 工具
+                    action_data = {
+                        "action": "update_cell",
+                        "rowIndex": row_index,
+                        "key": key,
+                        "value": value,
+                        "confidence": 1.0
+                    }
                     
                     # 发送 Tool Action 给前端
-                    # update_cell 返回的是 JSON 字符串，我们需要解析一下或者直接发
-                    action_data = json.loads(action_response)
-                    
                     await manager.send_message(websocket, {
                         "type": "tool_action",
-                        "content": f"正在修改第 {params.get('row_index')+1} 行数据...",
+                        "content": f"正在修改第 {row_index + 1} 行数据...",
                         "tool": "update_cell",
-                        "params": action_data, # 前端直接使用这个 params
+                        "params": action_data,  # 前端直接使用这个 params
                         "timestamp": _iso_now()
                     })
                     
-                    final_reply = f"已将第 {params.get('row_index')+1} 行的 {params.get('key')} 修改为 {params.get('value')}。"
+                    final_reply = f"已将第 {row_index + 1} 行的 {key} 修改为 {value}。"
                     
                 else:
                     final_reply = "抱歉，我暂时不支持这个操作。"
@@ -164,7 +162,6 @@ async def handle_chat_message(websocket: WebSocket, message: dict, client_id: st
         logger.error(f"处理对话消息失败: {str(e)}\n{traceback.format_exc()}")
         await manager.send_message(websocket, {
             "type": "error",
-            "content": "抱歉，我处理您的请求时遇到了问题。",
+            "message": f"抱歉，我处理您的请求时遇到了问题: {str(e)}",
             "timestamp": _iso_now()
         })
-
