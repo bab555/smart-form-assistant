@@ -1,59 +1,97 @@
 """
-WebSocket 连接管理器
+WebSocket 连接管理器 (极简版)
+
+原则：
+- 无状态：不保留业务数据，只管理连接
+- 极简：只做 connect/disconnect/send
+- 前端是 SoT：后端不缓存消息，断连即丢
 """
 from fastapi import WebSocket
-from typing import Dict, Set, Optional
+from typing import Dict, Optional
 from app.core.logger import app_logger as logger
-import asyncio
+from app.core.protocol import EventType, create_message
+import json
+
 
 class ConnectionManager:
-    """WebSocket 连接管理器"""
+    """极简 WebSocket 连接管理器"""
     
     def __init__(self):
-        # 使用 Dict 存储: client_id -> WebSocket
-        self.active_connections: Dict[str, WebSocket] = {}
-        # 同时保留 Set 兼容旧逻辑（虽然主要用 Dict）
-        self._all_connections: Set[WebSocket] = set()
+        # client_id -> WebSocket
+        self.connections: Dict[str, WebSocket] = {}
     
-    async def connect(self, websocket: WebSocket, client_id: str):
-        """接受连接并注册 client_id"""
-        await websocket.accept()
-        self.active_connections[client_id] = websocket
-        self._all_connections.add(websocket)
-        logger.info(f"WebSocket 连接建立: {client_id}, 当前连接数: {len(self.active_connections)}")
-    
-    def disconnect(self, websocket: WebSocket, client_id: Optional[str] = None):
-        """断开连接"""
-        if client_id and client_id in self.active_connections:
-            del self.active_connections[client_id]
-        
-        # 尝试从 value 中移除（如果是未知 client_id 的情况）
-        if websocket in self._all_connections:
-            self._all_connections.remove(websocket)
-            
-        logger.info(f"WebSocket 连接断开: {client_id}, 当前连接数: {len(self.active_connections)}")
-    
-    async def send_message(self, websocket: WebSocket, message: dict):
-        """发送消息到单个连接"""
+    async def connect(self, websocket: WebSocket, client_id: str) -> bool:
+        """
+        接受连接并发送 connection_ack
+        返回 True 表示连接成功
+        """
         try:
-            await websocket.send_json(message)
-        except Exception as e:
-            logger.error(f"发送消息失败: {str(e)}")
+            await websocket.accept()
+            self.connections[client_id] = websocket
+            logger.info(f"[WS] Connected: {client_id} (total: {len(self.connections)})")
             
-    async def send_to_client(self, client_id: str, message: dict):
-        """发送消息到指定 client_id"""
-        if client_id in self.active_connections:
-            websocket = self.active_connections[client_id]
-            await self.send_message(websocket, message)
-        else:
-            # logger.debug(f"Client {client_id} not connected, skipping message")
-            pass
+            # 发送连接确认
+            await self.send(client_id, EventType.CONNECTION_ACK, {
+                "status": "connected"
+            })
+            return True
+        except Exception as e:
+            logger.error(f"[WS] Connect failed: {client_id} - {str(e)}")
+            return False
     
-    async def broadcast(self, message: dict):
-        """广播消息"""
-        for connection in self._all_connections:
-            await self.send_message(connection, message)
+    def disconnect(self, client_id: str):
+        """断开连接"""
+        if client_id in self.connections:
+            del self.connections[client_id]
+            logger.info(f"[WS] Disconnected: {client_id} (total: {len(self.connections)})")
+    
+    def is_connected(self, client_id: str) -> bool:
+        """检查客户端是否在线"""
+        return client_id in self.connections
+    
+    async def send(self, client_id: str, event_type: EventType, data: Dict = None) -> bool:
+        """
+        发送消息到指定客户端
+        返回 True 表示发送成功
+        """
+        if client_id not in self.connections:
+            logger.debug(f"[WS] Client not connected: {client_id}")
+            return False
+        
+        try:
+            websocket = self.connections[client_id]
+            message = create_message(event_type, client_id, data)
+            await websocket.send_json(message)
+            return True
+        except Exception as e:
+            logger.error(f"[WS] Send failed to {client_id}: {str(e)}")
+            # 发送失败，清理连接
+            self.disconnect(client_id)
+            return False
+    
+    async def send_raw(self, client_id: str, message: Dict) -> bool:
+        """发送原始消息（已格式化的）"""
+        if client_id not in self.connections:
+            return False
+        
+        try:
+            websocket = self.connections[client_id]
+            await websocket.send_json(message)
+            return True
+        except Exception as e:
+            logger.error(f"[WS] Send raw failed to {client_id}: {str(e)}")
+            self.disconnect(client_id)
+            return False
+    
+    async def broadcast(self, event_type: EventType, data: Dict = None):
+        """广播消息给所有连接"""
+        for client_id in list(self.connections.keys()):
+            await self.send(client_id, event_type, data)
+    
+    def get_connection_count(self) -> int:
+        """获取当前连接数"""
+        return len(self.connections)
+
 
 # 全局单例
 manager = ConnectionManager()
-
