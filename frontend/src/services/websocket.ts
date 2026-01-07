@@ -17,9 +17,30 @@ export class WebSocketClient {
   public readonly clientId: string
 
   constructor(url?: string) {
-    this.url = url || import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws'
+    // 处理 WebSocket URL
+    const configUrl = url || import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws'
+    this.url = this.resolveWebSocketUrl(configUrl)
     // 生成随机 Client ID
     this.clientId = `client_${Math.random().toString(36).substring(2, 9)}_${Date.now()}`
+  }
+
+  /**
+   * 将相对路径转换为完整的 WebSocket URL
+   */
+  private resolveWebSocketUrl(configUrl: string): string {
+    // 如果已经是完整的 ws:// 或 wss:// URL，直接返回
+    if (configUrl.startsWith('ws://') || configUrl.startsWith('wss://')) {
+      return configUrl
+    }
+
+    // 相对路径：从当前页面 URL 推断
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const host = window.location.host
+    
+    // 确保路径以 / 开头
+    const path = configUrl.startsWith('/') ? configUrl : `/${configUrl}`
+    
+    return `${protocol}//${host}${path}`
   }
 
   /**
