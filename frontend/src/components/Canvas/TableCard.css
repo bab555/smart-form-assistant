@@ -1,0 +1,316 @@
+/* TableCard 表格卡片样式 */
+
+.table-card {
+  background: rgba(30, 30, 46, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.table-card:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.table-card.active {
+  border-color: rgba(59, 130, 246, 0.5);
+  box-shadow: 0 8px 32px rgba(59, 130, 246, 0.2);
+}
+
+.table-card.dragging {
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  cursor: grabbing;
+}
+
+/* 标题栏 - 整个区域可拖拽 */
+.table-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: rgba(0, 0, 0, 0.3);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  user-select: none;
+  cursor: grab;
+  touch-action: none;
+}
+
+.table-card-header:active {
+  cursor: grabbing;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.drag-handle-icon {
+  color: rgba(255, 255, 255, 0.3);
+  flex-shrink: 0;
+}
+
+.table-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.table-date {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  margin-left: 8px;
+}
+
+.streaming-indicator {
+  color: #3b82f6;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* 确保按钮区域不被拖拽事件阻止 */
+  pointer-events: auto;
+  touch-action: auto;
+}
+
+.action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.action-btn:hover {
+  background: rgba(59, 130, 246, 0.2);
+  color: #3b82f6;
+}
+
+.close-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.close-btn:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
+/* 表格内容 */
+.table-card-body {
+  padding: 8px;
+}
+
+/* react-datasheet-grid 样式覆盖 */
+.table-card .dsg-container {
+  --dsg-border-color: rgba(255, 255, 255, 0.1);
+  --dsg-cell-background-color: transparent;
+  --dsg-selection-border-color: #3b82f6;
+  --dsg-header-text-color: rgba(255, 255, 255, 0.7);
+  --dsg-cell-text-color: rgba(255, 255, 255, 0.9);
+  
+  background: transparent;
+  border: none;
+  font-size: 13px;
+}
+
+.table-card .dsg-row-header {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.table-card .dsg-cell {
+  border-color: rgba(255, 255, 255, 0.05);
+}
+
+.table-card .dsg-cell:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.table-card .dsg-cell-header {
+  background: rgba(0, 0, 0, 0.3);
+  font-weight: 600;
+}
+
+.table-card .dsg-input {
+  background: rgba(0, 0, 0, 0.3);
+  color: white;
+  border: 1px solid #3b82f6;
+}
+
+/* 有校对备注的行 */
+.table-card .row-with-note {
+  background: rgba(234, 179, 8, 0.1) !important;
+}
+
+/* 校对建议区域 */
+.calibration-notes {
+  padding: 8px 12px;
+  background: rgba(234, 179, 8, 0.08);
+  border-top: 1px solid rgba(234, 179, 8, 0.15);
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.notes-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.notes-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #eab308;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.note-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.note-row {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  background: rgba(234, 179, 8, 0.2);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #eab308;
+}
+
+.note-text {
+  flex: 1;
+  color: rgba(255, 255, 255, 0.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.note-dismiss {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.note-dismiss:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* Resize Handle */
+.resize-handle {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.3);
+  cursor: se-resize;
+  transition: all 0.2s ease;
+  z-index: 10;
+}
+
+.resize-handle:hover {
+  background: rgba(59, 130, 246, 0.2);
+  color: #3b82f6;
+}
+
+.resize-handle.resizing {
+  background: rgba(59, 130, 246, 0.3);
+  color: #3b82f6;
+}
+
+/* AG Grid 暗色主题覆盖 */
+.table-card .ag-theme-quartz {
+  --ag-background-color: transparent;
+  --ag-header-background-color: rgba(0, 0, 0, 0.3);
+  --ag-odd-row-background-color: rgba(255, 255, 255, 0.02);
+  --ag-row-hover-color: rgba(255, 255, 255, 0.05);
+  --ag-selected-row-background-color: rgba(59, 130, 246, 0.2);
+  --ag-header-foreground-color: rgba(255, 255, 255, 0.7);
+  --ag-foreground-color: rgba(255, 255, 255, 0.9);
+  --ag-border-color: rgba(255, 255, 255, 0.08);
+  --ag-secondary-border-color: rgba(255, 255, 255, 0.05);
+  --ag-cell-horizontal-border: solid rgba(255, 255, 255, 0.05);
+  --ag-input-focus-border-color: #3b82f6;
+  --ag-range-selection-border-color: #3b82f6;
+  --ag-font-size: 13px;
+}
+
+.table-card .ag-header-cell {
+  font-weight: 600;
+}
+
+.table-card .ag-cell {
+  line-height: 32px;
+}
+
+/* 表格内容区域 - 自适应高度 */
+.table-card-body {
+  padding: 8px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.table-card-body .ag-theme-quartz {
+  flex: 1;
+  min-height: 150px;
+}
+
+/* 让卡片使用 flex 布局 */
+.table-card {
+  display: flex;
+  flex-direction: column;
+}

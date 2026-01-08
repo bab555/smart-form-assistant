@@ -34,6 +34,12 @@ export enum EventType {
   // 对话
   CHAT_MESSAGE = 'chat_message',
   
+  // 工具调用
+  TOOL_CALL = 'tool_call',
+  
+  // 表格元数据
+  TABLE_METADATA = 'table_metadata',
+  
   // 异常
   ERROR = 'error',
 }

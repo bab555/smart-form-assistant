@@ -16,6 +16,8 @@
     "test:coverage": "vitest --coverage"
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/utilities": "^3.2.2",
     "@tanstack/react-query": "^5.17.19",
     "ag-grid-community": "^31.0.3",
     "ag-grid-react": "^31.0.3",
@@ -23,9 +25,11 @@
     "framer-motion": "^10.18.0",
     "lucide-react": "^0.307.0",
     "react": "^18.2.0",
+    "react-datasheet-grid": "^4.11.5",
     "react-dom": "^18.2.0",
     "reactflow": "^11.10.4",
     "recordrtc": "^5.6.2",
+    "xlsx": "^0.18.5",
     "zustand": "^4.4.7"
   },
   "devDependencies": {
