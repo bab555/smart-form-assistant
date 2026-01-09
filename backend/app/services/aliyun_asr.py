@@ -1,31 +1,29 @@
 """
-阿里云 ASR 语音识别服务封装
+DashScope 语音识别服务 (Paraformer)
+
+使用阿里云 DashScope 的 Paraformer 模型进行语音识别
+与 LLM 服务使用相同的 API Key
 """
-import json
 import base64
+import httpx
 from typing import Optional
 from app.core.config import settings
 from app.core.logger import app_logger as logger
 
-# 注意: 阿里云 ASR 需要使用 nls-sdk-python
-# 这里提供简化版封装，使用 HTTP API 方式
 
-
-class AliyunASRService:
-    """阿里云语音识别服务"""
+class DashScopeASRService:
+    """DashScope Paraformer 语音识别服务"""
     
     def __init__(self):
         """初始化 ASR 服务"""
-        self.app_key = settings.ALIYUN_ASR_APP_KEY
-        self.access_key_id = settings.ALIYUN_ACCESS_KEY_ID
-        self.access_key_secret = settings.ALIYUN_ACCESS_KEY_SECRET
-        self.endpoint = settings.ALIYUN_ASR_ENDPOINT
-        logger.info("阿里云 ASR 服务初始化完成")
+        self.api_key = settings.DASHSCOPE_API_KEY
+        self.base_url = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"
+        logger.info("DashScope ASR 服务初始化完成")
     
     async def recognize_audio(
         self,
         audio_data: bytes,
-        format: str = "wav",
+        format: str = "webm",
         sample_rate: int = 16000
     ) -> str:
         """
@@ -33,94 +31,119 @@ class AliyunASRService:
         
         Args:
             audio_data: 音频字节数据
-            format: 音频格式（wav/mp3/pcm）
+            format: 音频格式（webm/wav/mp3/pcm）
             sample_rate: 采样率
             
         Returns:
             str: 识别的文本
         """
+        if not self.api_key:
+            logger.error("DASHSCOPE_API_KEY 未配置")
+            return "语音识别服务未配置"
+        
         try:
-            # 这里使用简化的一句话识别 API
-            # 实际生产环境建议使用官方 SDK
+            # 将音频数据转换为 base64
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
             
-            import httpx
-            
-            # 构建请求
-            url = f"https://{self.endpoint}/stream/v1/asr"
+            # 使用 DashScope 的实时语音识别 API
+            # 参考: https://help.aliyun.com/zh/dashscope/developer-reference/paraformer-real-time-speech-recognition
             
             headers = {
-                "Content-Type": f"audio/{format}",
-                "X-NLS-Token": await self._get_token()
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
             }
             
-            params = {
-                "appkey": self.app_key,
-                "format": format,
-                "sample_rate": sample_rate
+            # 使用一句话识别模型
+            payload = {
+                "model": "paraformer-v2",
+                "input": {
+                    "audio": audio_base64,
+                    "format": format,
+                    "sample_rate": sample_rate,
+                },
+                "parameters": {
+                    "language_hints": ["zh", "en"],  # 支持中英文
+                }
             }
             
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    url,
+                    self.base_url,
                     headers=headers,
-                    params=params,
-                    content=audio_data,
+                    json=payload,
                     timeout=30.0
                 )
                 
                 if response.status_code == 200:
                     result = response.json()
-                    text = result.get("result", "")
-                    logger.info(f"ASR 识别成功: {text}")
-                    return text
-                else:
-                    logger.error(f"ASR 识别失败: {response.status_code}")
-                    raise Exception(f"ASR 识别失败: {response.text}")
                     
+                    # 解析结果
+                    output = result.get("output", {})
+                    
+                    # 实时识别返回格式
+                    if "sentence" in output:
+                        text = output["sentence"].get("text", "")
+                    # 异步识别返回格式
+                    elif "results" in output:
+                        results = output["results"]
+                        if results:
+                            text = results[0].get("text", "")
+                        else:
+                            text = ""
+                    # 直接文本格式
+                    elif "text" in output:
+                        text = output["text"]
+                    else:
+                        text = str(output)
+                    
+                    logger.info(f"ASR 识别成功: {text}")
+                    return text.strip() if text else "无法识别语音内容"
+                else:
+                    error_msg = response.text
+                    logger.error(f"ASR 识别失败: {response.status_code} - {error_msg}")
+                    
+                    # 尝试解析错误信息
+                    try:
+                        error_json = response.json()
+                        error_msg = error_json.get("message", error_msg)
+                    except:
+                        pass
+                    
+                    return f"语音识别失败: {error_msg}"
+                    
+        except httpx.TimeoutException:
+            logger.error("ASR 识别超时")
+            return "语音识别超时，请重试"
         except Exception as e:
             logger.error(f"ASR 识别异常: {str(e)}")
-            # 开发阶段返回 Mock 数据
-            logger.warning("返回 Mock ASR 结果")
-            return self._mock_asr_result(audio_data)
+            return f"语音识别出错: {str(e)}"
     
-    async def _get_token(self) -> str:
+    async def recognize_audio_file(self, file_path: str) -> str:
         """
-        获取访问 Token
-        实际生产环境需要实现完整的鉴权流程
-        """
-        # 简化处理：这里应该调用阿里云 Token 服务
-        # 暂时返回 access_key_id 作为 token
-        return self.access_key_id
-    
-    def _mock_asr_result(self, audio_data: bytes) -> str:
-        """
-        Mock ASR 结果（用于开发测试）
+        识别音频文件（从文件路径）
         
         Args:
-            audio_data: 音频数据
+            file_path: 音频文件路径
             
         Returns:
-            str: Mock 的识别结果
+            str: 识别的文本
         """
-        # 根据音频长度返回不同的 Mock 结果
-        audio_len = len(audio_data)
+        with open(file_path, 'rb') as f:
+            audio_data = f.read()
         
-        mock_results = [
-            "把第一行的商品名称改成红富士苹果",
-            "删除最后一行",
-            "添加一行数据",
-            "把价格改成15元",
-            "清空所有数据"
-        ]
+        # 根据文件扩展名确定格式
+        ext = file_path.split('.')[-1].lower()
+        format_map = {
+            'wav': 'wav',
+            'mp3': 'mp3',
+            'webm': 'webm',
+            'ogg': 'ogg',
+            'pcm': 'pcm',
+        }
+        audio_format = format_map.get(ext, 'wav')
         
-        # 简单的哈希选择
-        index = audio_len % len(mock_results)
-        result = mock_results[index]
-        
-        logger.info(f"返回 Mock ASR 结果: {result}")
-        return result
+        return await self.recognize_audio(audio_data, format=audio_format)
 
 
 # 全局单例
-asr_service = AliyunASRService()
-
+asr_service = DashScopeASRService()

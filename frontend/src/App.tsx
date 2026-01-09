@@ -1,9 +1,9 @@
 /**
- * App 入口组件 (重构版)
+ * App 入口组件 (订单系统)
  * 
  * 布局：
- * - 全屏画布 (Canvas)
- * - 左侧悬浮窗 (FloatingPanel)
+ * - 左侧：AI 助手面板 (FloatingPanel) - 聊天、上传、状态
+ * - 右侧：表格工作区 (Canvas) - Sheet 模式
  * - Toast 通知
  */
 
@@ -22,8 +22,10 @@ const App: React.FC = () => {
 
   return (
     <div className="app">
-      <Canvas />
+      {/* 左侧：AI 助手面板 */}
       <FloatingPanel />
+      {/* 右侧：表格工作区 */}
+      <Canvas />
       <ToastContainer toasts={toasts} onRemove={removeToast} />
     </div>
   );

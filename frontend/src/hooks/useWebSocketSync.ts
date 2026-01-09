@@ -11,18 +11,17 @@ import { useCanvasStore } from '@/store/useCanvasStore';
 import { toast } from '@/components/Toast';
 
 export function useWebSocketSync() {
-  const {
-    createTable,
-    appendRow,
-    replaceRows,
-    updateCell,
-    addRow,
-    deleteRow,
-    setCalibrationNote,
-    updateMetadata,
-    setStreaming,
-    setConnected,
-  } = useCanvasStore();
+  // 从 store 获取操作方法
+  const createTable = useCanvasStore((state) => state.createTable);
+  const appendRow = useCanvasStore((state) => state.appendRow);
+  const replaceRows = useCanvasStore((state) => state.replaceRows);
+  const updateCell = useCanvasStore((state) => state.updateCell);
+  const addRow = useCanvasStore((state) => state.addRow);
+  const deleteRow = useCanvasStore((state) => state.deleteRow);
+  const setCalibrationNote = useCanvasStore((state) => state.setCalibrationNote);
+  const updateMetadata = useCanvasStore((state) => state.updateMetadata);
+  const setStreaming = useCanvasStore((state) => state.setStreaming);
+  const setConnected = useCanvasStore((state) => state.setConnected);
 
   // 处理 CONNECTION_ACK
   const handleConnectionAck = useCallback(() => {
@@ -108,6 +107,17 @@ export function useWebSocketSync() {
     const { tool, params } = data;
     console.log('[Sync] Tool call:', tool, params);
     
+    // create_table 不需要 activeTableId
+    if (tool === 'create_table') {
+      createTable({
+        id: params.table_id,
+        title: params.title || '新表格',
+        schema: params.schema,
+        rows: params.data,
+      });
+      return;
+    }
+    
     // 获取当前活动表格
     const { activeTableId } = useCanvasStore.getState();
     const tableId = params?.table_id || activeTableId;
@@ -134,7 +144,7 @@ export function useWebSocketSync() {
       default:
         console.warn('[Sync] Unknown tool:', tool);
     }
-  }, [updateCell, addRow, deleteRow]);
+  }, [createTable, updateCell, addRow, deleteRow]);
 
   // 处理 TASK_START
   const handleTaskStart = useCallback((data: any) => {

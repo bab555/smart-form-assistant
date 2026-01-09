@@ -1,9 +1,9 @@
 /**
- * 右键菜单组件
+ * 右键菜单组件 - 白色主题
  */
 
 import React, { useEffect, useRef } from 'react';
-import { Plus, Copy, Trash2, FileSpreadsheet, Download } from 'lucide-react';
+import { Plus, Download, X, Minus } from 'lucide-react';
 import './ContextMenu.css';
 
 export interface MenuItem {
@@ -12,6 +12,7 @@ export interface MenuItem {
   onClick: () => void;
   disabled?: boolean;
   divider?: boolean;
+  danger?: boolean;  // 危险操作（红色高亮）
 }
 
 interface ContextMenuProps {
@@ -75,7 +76,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
         <React.Fragment key={index}>
           {item.divider && <div className="context-menu-divider" />}
           <button
-            className={`context-menu-item ${item.disabled ? 'disabled' : ''}`}
+            className={`context-menu-item ${item.disabled ? 'disabled' : ''} ${item.danger ? 'danger' : ''}`}
             onClick={() => {
               if (!item.disabled) {
                 item.onClick();
@@ -93,58 +94,57 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
   );
 };
 
-// 预定义菜单项
+// 预定义菜单项 - 画布右键菜单（仅导出所有）
 export const createCanvasMenuItems = (
-  onCreateTable: () => void,
   onExportAll: () => void,
-  onCreateFromTemplate: () => void,
-  hasSelection: boolean,
-  onPaste?: () => void
+  hasTableData: boolean,
 ): MenuItem[] => [
   {
-    label: '新建空白表格',
-    icon: <Plus size={14} />,
-    onClick: onCreateTable,
-  },
-  {
-    label: '从模板新建',
-    icon: <FileSpreadsheet size={14} />,
-    onClick: onCreateFromTemplate,
-  },
-  {
-    label: '导出所有表格',
+    label: '导出所有 Sheet',
     icon: <Download size={14} />,
     onClick: onExportAll,
-    divider: true,
-  },
-  {
-    label: '粘贴',
-    icon: <Copy size={14} />,
-    onClick: onPaste || (() => {}),
-    disabled: !hasSelection,
+    disabled: !hasTableData,
   },
 ];
 
+// 表格右键菜单项
 export const createTableMenuItems = (
-  onDelete: () => void,
-  onDuplicate: () => void,
-  onExport: () => void
+  onAddRow: () => void,
+  onDeleteRow: () => void,
+  onExportCurrent: () => void,
+  onExportAll: () => void,
+  onCloseSheet: () => void,
+  canDeleteRow: boolean,
 ): MenuItem[] => [
   {
-    label: '复制表格',
-    icon: <Copy size={14} />,
-    onClick: onDuplicate,
+    label: '添加行',
+    icon: <Plus size={14} />,
+    onClick: onAddRow,
   },
   {
-    label: '导出 CSV',
+    label: '删除选中行',
+    icon: <Minus size={14} />,
+    onClick: onDeleteRow,
+    disabled: !canDeleteRow,
+    danger: true,
+  },
+  {
+    label: '导出当前 Sheet',
     icon: <Download size={14} />,
-    onClick: onExport,
+    onClick: onExportCurrent,
+    divider: true,
   },
   {
-    label: '删除表格',
-    icon: <Trash2 size={14} />,
-    onClick: onDelete,
+    label: '导出所有 Sheet',
+    icon: <Download size={14} />,
+    onClick: onExportAll,
+  },
+  {
+    label: '关闭当前 Sheet',
+    icon: <X size={14} />,
+    onClick: onCloseSheet,
     divider: true,
+    danger: true,
   },
 ];
 

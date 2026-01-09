@@ -24,7 +24,7 @@ export interface TableData {
   schema: ColumnSchema[];
   rows: TableRow[];
   metadata: TableMetadata;
-  calibrationNotes: Record<number, string>;  // rowIndex -> note
+  calibrationNotes: Record<number, string>;  // rowIndex -> note (保留用于高亮提示)
   isStreaming: boolean;
 }
 
@@ -69,14 +69,16 @@ export interface CanvasState {
   importTables: (tables: Record<string, TableData>) => void;
 }
 
-// ========== 基础模板（与后端一致） ==========
+// ========== 基础模板（标准订单格式） ==========
 
 const DEFAULT_SCHEMA: ColumnSchema[] = [
-  { key: '品名', title: '品名', type: 'text' },
-  { key: '数量', title: '数量', type: 'number' },
-  { key: '规格', title: '规格', type: 'text' },
-  { key: '单价', title: '单价', type: 'number' },
-  { key: '总价', title: '总价', type: 'number' },
+  { key: '序号', title: '序号', type: 'text', width: 70 },
+  { key: '识别商品', title: '识别商品', type: 'text', width: 180 },
+  { key: '订单商品', title: '订单商品', type: 'text', width: 180 },
+  { key: '规格', title: '规格', type: 'text', width: 130 },
+  { key: '单位', title: '单位', type: 'text', width: 80 },
+  { key: '数量', title: '数量', type: 'number', width: 90 },
+  { key: '备注', title: '备注', type: 'text', width: 200 },
 ];
 
 const createDefaultTable = (id: string, options?: Partial<TableData>): TableData => {
@@ -90,9 +92,9 @@ const createDefaultTable = (id: string, options?: Partial<TableData>): TableData
   
   return {
     id,
-    title: options?.title || '新表格',
-    position: options?.position || { x: 100, y: 100 },
-    size: options?.size || { width: 600, height: 400 },
+    title: options?.title || '新订单',
+    position: options?.position || { x: 0, y: 0 },
+    size: options?.size || { width: 800, height: 600 },
     schema,
     rows: options?.rows?.length ? options.rows : [defaultRow],
     metadata: options?.metadata || {},
@@ -111,7 +113,7 @@ export const useCanvasStore = create<CanvasState>((set) => ({
 
   // 表格管理
   createTable: (options) => {
-    const id = options?.id || `table_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const id = options?.id || `sheet_${Date.now()}`;
     const newTable = createDefaultTable(id, options);
     
     set((state) => ({
@@ -136,7 +138,7 @@ export const useCanvasStore = create<CanvasState>((set) => ({
     set({ activeTableId: tableId });
   },
 
-  // 位置/大小
+  // 位置/大小 (虽然 Sheet 模式下不怎么用了，但为了兼容性保留)
   updateTablePosition: (tableId, position) => {
     set((state) => {
       const table = state.tables[tableId];
@@ -364,4 +366,3 @@ export const useCanvasStore = create<CanvasState>((set) => ({
     set({ tables });
   },
 }));
-

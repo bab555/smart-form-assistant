@@ -2,14 +2,14 @@
  * FloatingPanel 左侧悬浮窗
  * 
  * 功能：
- * - 对话列表
+ * - 对话列表（支持文件/图片显示）
  * - 文字输入
  * - 语音按钮
- * - 文件上传
+ * - 文件上传（点击/拖拽/粘贴）
  * - 可折叠
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { wsClient } from '@/services/websocket';
 import { EventType, ChatMessagePayload } from '@/services/protocol';
 import { useCanvasStore } from '@/store/useCanvasStore';
@@ -22,16 +22,25 @@ import {
   Upload,
   Bot,
   User,
-  Plus,
+  Image as ImageIcon,
+  X,
 } from 'lucide-react';
-import { TemplateSelector } from './TemplateSelector';
 import './FloatingPanel.css';
+
+// 文件附件类型
+interface FileAttachment {
+  name: string;
+  type: 'image' | 'file';
+  url?: string;  // 图片预览 URL
+  size?: number;
+}
 
 interface ChatMessage {
   id: string;
   role: 'user' | 'agent' | 'system';
   content: string;
   timestamp: Date;
+  attachment?: FileAttachment;  // 文件附件
 }
 
 export const FloatingPanel: React.FC = () => {
@@ -39,9 +48,11 @@ export const FloatingPanel: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isUploading, setIsUploading] = useState(false);
-  const [showTemplates, setShowTemplates] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   
@@ -113,14 +124,50 @@ export const FloatingPanel: React.FC = () => {
     setInputValue('');
   };
 
-  // 文件上传
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // 判断是否为图片文件
+  const isImageFile = (file: File) => {
+    return file.type.startsWith('image/');
+  };
 
+  // 获取文件图标
+  const getFileIcon = (fileName: string) => {
+    const ext = fileName.split('.').pop()?.toLowerCase();
+    if (['xlsx', 'xls', 'csv'].includes(ext || '')) return '📊';
+    if (['docx', 'doc'].includes(ext || '')) return '📝';
+    if (['pdf'].includes(ext || '')) return '📄';
+    return '📎';
+  };
+
+  // 通用文件处理函数
+  const processFile = useCallback(async (file: File) => {
+    if (isUploading) return;
+    
     setIsUploading(true);
 
     try {
+      // 创建文件附件信息
+      const isImage = isImageFile(file);
+      const attachment: FileAttachment = {
+        name: file.name,
+        type: isImage ? 'image' : 'file',
+        size: file.size,
+      };
+
+      // 如果是图片，创建预览 URL
+      if (isImage) {
+        attachment.url = URL.createObjectURL(file);
+      }
+
+      // 添加用户上传消息到聊天记录
+      const uploadMessage: ChatMessage = {
+        id: `${Date.now()}_upload`,
+        role: 'user',
+        content: isImage ? '上传了一张图片' : `上传了文件: ${file.name}`,
+        timestamp: new Date(),
+        attachment,
+      };
+      setMessages((prev) => [...prev, uploadMessage]);
+
       // 创建新表格来接收数据
       const tableId = createTable({
         title: file.name.replace(/\.[^/.]+$/, ''),
@@ -148,7 +195,7 @@ export const FloatingPanel: React.FC = () => {
         {
           id: `${Date.now()}_system`,
           role: 'system',
-          content: `正在处理文件: ${file.name}`,
+          content: `正在处理: ${file.name}`,
           timestamp: new Date(),
         },
       ]);
@@ -165,11 +212,65 @@ export const FloatingPanel: React.FC = () => {
       ]);
     } finally {
       setIsUploading(false);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
+    }
+  }, [isUploading, createTable]);
+
+  // 文件选择
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    await processFile(file);
+    
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
     }
   };
+
+  // 拖拽处理
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      await processFile(files[0]);
+    }
+  }, [processFile]);
+
+  // 粘贴处理（只处理文件/图片，不处理文字）
+  const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      
+      // 只处理文件类型（图片或其他文件）
+      if (item.kind === 'file') {
+        e.preventDefault(); // 阻止默认粘贴行为
+        const file = item.getAsFile();
+        if (file) {
+          await processFile(file);
+        }
+        return;
+      }
+    }
+    // 如果不是文件，不做任何处理，让默认行为处理文字粘贴
+  }, [processFile]);
 
   // 语音输入
   const handleVoice = async () => {
@@ -258,13 +359,42 @@ export const FloatingPanel: React.FC = () => {
     }
   };
 
+  // 渲染消息附件
+  const renderAttachment = (attachment: FileAttachment) => {
+    if (attachment.type === 'image' && attachment.url) {
+      return (
+        <div className="attachment-image" onClick={() => setPreviewImage(attachment.url || null)}>
+          <img src={attachment.url} alt={attachment.name} />
+          <div className="image-overlay">
+            <ImageIcon size={16} />
+            <span>点击查看</span>
+          </div>
+        </div>
+      );
+    }
+    
+    return (
+      <div className="attachment-file">
+        <span className="file-icon">{getFileIcon(attachment.name)}</span>
+        <div className="file-info">
+          <span className="file-name">{attachment.name}</span>
+          {attachment.size && (
+            <span className="file-size">{(attachment.size / 1024).toFixed(1)} KB</span>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className={`floating-panel ${isCollapsed ? 'collapsed' : ''}`}>
-      {/* 模板选择弹窗 */}
-      {showTemplates && (
-        <div className="template-modal">
-          <div className="template-modal-backdrop" onClick={() => setShowTemplates(false)} />
-          <TemplateSelector onClose={() => setShowTemplates(false)} />
+      {/* 图片预览弹窗 */}
+      {previewImage && (
+        <div className="image-preview-modal" onClick={() => setPreviewImage(null)}>
+          <button className="preview-close" onClick={() => setPreviewImage(null)}>
+            <X size={24} />
+          </button>
+          <img src={previewImage} alt="预览" />
         </div>
       )}
 
@@ -285,12 +415,29 @@ export const FloatingPanel: React.FC = () => {
             <span>AI 助手</span>
           </div>
 
-          {/* 消息列表 */}
-          <div className="messages-container">
+          {/* 消息列表（支持拖拽） */}
+          <div 
+            ref={messagesContainerRef}
+            className={`messages-container ${isDragOver ? 'drag-over' : ''}`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            onPaste={handlePaste}
+            tabIndex={0}
+          >
+            {/* 拖拽提示 */}
+            {isDragOver && (
+              <div className="drag-overlay">
+                <Upload size={48} />
+                <p>释放以上传文件</p>
+              </div>
+            )}
+
             {messages.length === 0 ? (
               <div className="empty-messages">
                 <Bot size={32} />
                 <p>上传文件或输入指令开始</p>
+                <p className="hint">支持拖拽文件或粘贴截图</p>
               </div>
             ) : (
               messages.map((msg) => (
@@ -298,7 +445,14 @@ export const FloatingPanel: React.FC = () => {
                   <div className="message-avatar">
                     {msg.role === 'user' ? <User size={14} /> : <Bot size={14} />}
                   </div>
-                  <div className="message-content">{msg.content}</div>
+                  <div className="message-bubble">
+                    {/* 如果有附件，先显示附件 */}
+                    {msg.attachment && renderAttachment(msg.attachment)}
+                    {/* 消息文本（如果有附件，显示较小的文字） */}
+                    <div className={`message-text ${msg.attachment ? 'with-attachment' : ''}`}>
+                      {msg.content}
+                    </div>
+                  </div>
                 </div>
               ))
             )}
@@ -312,31 +466,26 @@ export const FloatingPanel: React.FC = () => {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".xlsx,.xls,.csv,.docx,.doc,.pdf,.png,.jpg,.jpeg"
+                accept=".xlsx,.xls,.csv,.docx,.doc,.pdf,.png,.jpg,.jpeg,.webp,.gif"
                 onChange={handleFileSelect}
                 style={{ display: 'none' }}
               />
               <button
-                className="tool-btn"
-                onClick={() => setShowTemplates(true)}
-                title="新建表格"
-              >
-                <Plus size={16} />
-              </button>
-              <button
-                className="tool-btn"
+                className="tool-btn upload-btn"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isUploading}
                 title="上传文件"
               >
                 <Upload size={16} />
+                <span>上传</span>
               </button>
               <button 
-                className={`tool-btn ${isRecording ? 'recording' : ''}`}
+                className={`tool-btn voice-btn ${isRecording ? 'recording' : ''}`}
                 onClick={handleVoice} 
                 title={isRecording ? '停止录音' : '语音输入'}
               >
                 <Mic size={16} />
+                <span>{isRecording ? '录音中...' : '语音'}</span>
               </button>
             </div>
 

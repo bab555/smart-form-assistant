@@ -127,9 +127,13 @@ export interface ColumnSchema {
 }
 
 export interface TableMetadata {
-  date?: string;
-  orderNo?: string;
-  customer?: string;
+  date?: string;          // 录入时间 (YYYY-MM-DD HH:mm)
+  customer?: string;      // 客户名称
+  customerId?: string;    // 客户ID
+  restaurant?: string;    // 餐厅名称
+  restaurantId?: string;  // 餐厅ID
+  orderType?: string;     // 订单类型名称
+  orderTypeId?: string;   // 订单类型ID
   [key: string]: unknown;
 }
 
@@ -138,4 +142,3 @@ export interface TableMetadata {
 export function isEventType(type: string): type is EventType {
   return Object.values(EventType).includes(type as EventType);
 }
-

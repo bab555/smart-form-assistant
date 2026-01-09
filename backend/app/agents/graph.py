@@ -1,571 +1,1388 @@
 """
-LangGraph 工作流定义
+LangGraph 工作流定义 - ComfyUI 风格
+
+核心原则：
+1. 后端是无状态执行器，只处理单次任务
+2. 通过 WebSocket 推送所有结果，前端是 SoT
+3. 支持行级流式输出 (ROW_COMPLETE)
 """
-from typing import TypedDict, List, Optional, Dict, Any, Annotated
-from operator import add
+from typing import TypedDict, List, Optional, Dict, Any, Literal
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from app.core.logger import app_logger as logger
-from app.services.aliyun_llm import llm_service
-from app.services.aliyun_ocr import ocr_service
-from app.services.aliyun_asr import asr_service
-from app.services.knowledge_base import vector_store
-from app.services.skill_registry import skill_registry
-from app.services.content_analyzer import (
-    content_analyzer, 
-    ContentAnalysisResult, 
-    SourceType, 
-    ContentType
-)
 from app.core.connection_manager import manager
-from datetime import datetime, timezone
+from app.core.protocol import EventType
+from app.utils.helpers import generate_trace_id
+from app.core.templates import UNSTRUCTURED_EXTRACTION_PROMPT, map_row_to_template
 import json
 
 
 # ========== Agent 状态定义 ==========
 class AgentState(TypedDict):
-    """Agent 工作流状态"""
-    messages: Annotated[List[BaseMessage], add]  # 对话历史（累加）
-    input_type: str  # 输入类型：image/audio/excel/word
-    current_step: str  # 当前步骤：idle/ocr/calibration/query/fill
-    client_id: Optional[str] # 客户端 ID，用于 WebSocket 推送
+    """Agent 工作流状态 - 单次任务"""
+    # 任务标识
+    task_id: str
+    client_id: str
+    task_type: Literal["extract", "audio", "chat"]
     
     # 输入数据
-    image_data: Optional[bytes]
-    audio_data: Optional[bytes]
+    file_content: Optional[bytes]
+    file_name: Optional[str]
+    text_content: Optional[str]
     
     # 中间结果
-    ocr_text: Optional[str]  # OCR 识别结果
-    asr_text: Optional[str]  # ASR 识别结果
+    ocr_text: Optional[str]
+    ocr_notes: Optional[List[str]]
+    content_type: Optional[str]
+    extracted_rows: List[Dict[str, Any]]
     
-    # 内容分析结果
-    source_type: Optional[str]  # excel/word/printed/handwritten
-    content_analysis: Optional[Dict]  # 完整分析结果
+    # 表格信息
+    table_id: Optional[str]
     
-    # 表单数据
-    form_data: Dict[str, Any]  # 当前表格数据
-    
-    # 歧义处理
-    ambiguity_flag: bool  # 是否有待确认项
-    ambiguous_items: List[Dict]  # 歧义项列表
+    # 表格上下文（前端传递，用于咨询分析）
+    table_context: Optional[Dict[str, Any]]  # {title, rows, schema, metadata}
     
     # 控制流
-    next_action: Optional[str]  # 下一步动作
-    error: Optional[str]  # 错误信息
+    next_node: Optional[str]
+    error: Optional[str]
 
 
 # ========== 辅助函数 ==========
 
-def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+async def push_event(client_id: str, event_type: EventType, data: dict):
+    """推送 WebSocket 事件"""
+    await manager.send(client_id, event_type, data)
 
-async def notify_step_start(state: AgentState, step: str, message: str):
-    """通知步骤开始"""
-    if not state.get('client_id'): return
-    await manager.send_to_client(state['client_id'], {
-        "type": "step_start",
-        "step": step,
-        "content": message,
-        "status": "running",
-        "timestamp": _iso_now()
-    })
 
-async def notify_step_end(state: AgentState, step: str, message: str):
-    """通知步骤结束"""
-    if not state.get('client_id'): return
-    await manager.send_to_client(state['client_id'], {
-        "type": "step_end",
-        "step": step,
-        "content": message,
-        "status": "success",
-        "timestamp": _iso_now()
-    })
-
-async def notify_log(state: AgentState, step: str, message: str):
-    """发送日志"""
-    if not state.get('client_id'): return
-    await manager.send_to_client(state['client_id'], {
-        "type": "step_log",
-        "step": step,
-        "message": message,
-        "timestamp": _iso_now()
+async def push_row(client_id: str, table_id: str, row: dict, row_index: int):
+    """推送单行数据"""
+    await push_event(client_id, EventType.ROW_COMPLETE, {
+        "table_id": table_id,
+        "row": row,
+        "row_index": row_index
     })
 
 
-# ========== 节点函数定义 ==========
+async def push_error(client_id: str, task_id: str, error_msg: str):
+    """推送错误"""
+    await manager.send(client_id, EventType.ERROR, {
+        "task_id": task_id,
+        "code": 500,
+        "msg": error_msg
+    })
+
+
+# ========== 节点函数 ==========
 
 async def router_node(state: AgentState) -> AgentState:
     """
-    路由节点 - 根据输入类型决定工作流
+    路由节点 - 根据任务类型决定下一步
     """
-    logger.info(f"[Router] 输入类型: {state['input_type']}")
+    task_type = state.get("task_type")
+    file_name = state.get("file_name", "")
     
-    state['current_step'] = 'routing'
+    logger.info(f"[Router] Task: {state['task_id']}, Type: {task_type}, File: {file_name}")
     
-    if state['input_type'] == 'image':
-        state['next_action'] = 'visual_flow'
-    elif state['input_type'] == 'audio':
-        state['next_action'] = 'audio_flow'
-    elif state['input_type'] in ['excel', 'word', 'document']:
-        # Excel/Word 直接进入视觉流程（跳过手写判断）
-        state['source_type'] = state['input_type']
-        state['next_action'] = 'visual_flow'
-    else:
-        state['error'] = f"不支持的输入类型: {state['input_type']}"
-        state['next_action'] = 'end'
+    # 推送任务开始
+    await push_event(state["client_id"], EventType.TASK_START, {
+        "task_id": state["task_id"],
+        "type": task_type,
+        "message": "开始处理..."
+    })
     
-    return state
-
-
-async def visual_flow_node(state: AgentState) -> AgentState:
-    """
-    视觉流节点 - 处理图片/文档识别
-    包含：手写判断 → OCR → 内容分析 → Skill匹配 → 条件校准
-    """
-    logger.info("[Visual Flow] 开始处理")
-    
-    # 确保 skill_registry 已初始化
-    skill_registry.initialize()
-    
-    try:
-        # 确定来源类型
-        source_type_str = state.get('source_type', 'image')
-        
-        if source_type_str == 'excel':
-            source_type = SourceType.EXCEL
-        elif source_type_str == 'word':
-            source_type = SourceType.WORD
-        else:
-            source_type = SourceType.PRINTED
-        
-        # ========== Step 1: OCR 识别 ==========
-        ocr_text = state.get('ocr_text')
-        
-        if not ocr_text and state.get('image_data'):
-            state['current_step'] = 'ocr'
-            logger.info("[Visual Flow] 执行 OCR 识别...")
-            await notify_step_start(state, "ocr", "正在执行 OCR 视觉识别...")
-            
-            ocr_text = await ocr_service.recognize_general(image_data=state['image_data'])
-            state['ocr_text'] = ocr_text
-            
-            logger.info(f"[Visual Flow] OCR 结果: {ocr_text[:100] if ocr_text else 'empty'}...")
-            await notify_step_end(state, "ocr", "OCR 识别完成")
-        
-        # ========== Step 2: 内容分析 ==========
-        state['current_step'] = 'analyzing'
-        logger.info("[Visual Flow] 执行内容分析...")
-        await notify_step_start(state, "analyzing", "正在分析内容类型与特征...")
-        
-        analysis_result: ContentAnalysisResult = await content_analyzer.full_analysis(
-            source_type=source_type,
-            image_data=state.get('image_data'),
-            ocr_text=ocr_text
-        )
-        
-        # 保存分析结果
-        state['source_type'] = analysis_result.source_type.value
-        state['content_analysis'] = {
-            "source_type": analysis_result.source_type.value,
-            "content_type": analysis_result.content_type.value,
-            "has_handwriting": analysis_result.has_handwriting,
-            "matched_skills": analysis_result.matched_skills,
-            "should_calibrate": analysis_result.should_calibrate,
-            "is_article": analysis_result.is_article,
-            "reason": analysis_result.analysis_reason
-        }
-        
-        if analysis_result.has_handwriting:
-            await notify_log(state, "analyzing", "检测到手写内容")
-        if analysis_result.matched_skills:
-            await notify_log(state, "analyzing", f"匹配到技能: {', '.join(analysis_result.matched_skills)}")
-            
-        await notify_step_end(state, "analyzing", "内容分析完成")
-        
-        # ========== Step 2.5: 处理文章内容 ==========
-        if analysis_result.is_article:
-            # ... (文章处理逻辑不变)
-            logger.info("[Visual Flow] 检测到文章内容，返回特殊提示")
-            state['form_data'] = {
-                "rows": [[{
-                    "key": "content_notice",
-                    "label": "内容提示",
-                    "value": "（完整文章内容，不适合表格展示）",
-                    "original_text": ocr_text[:200] + "...",
-                    "confidence": 1.0,
-                    "is_ambiguous": False,
-                    "candidates": None,
-                    "data_type": "notice"
-                }]],
-                "is_article": True
-            }
-            state['messages'].append(AIMessage(content="检测到文章内容。"))
-            state['next_action'] = 'end'
-            return state
-        
-        # ========== Step 3: 提取结构化数据 ==========
-        state['current_step'] = 'extraction'
-        logger.info("[Visual Flow] 使用 LLM 提取结构化数据...")
-        await notify_step_start(state, "extraction", "正在提取结构化数据...")
-        
-        # 根据是否需要校准来决定提取策略
-        if analysis_result.should_calibrate:
-            # 策略 A: 农产品/相关领域 - 使用特定 Schema
-            extraction_prompt = f"""
-请从以下文本（Markdown 格式）中提取表单数据。
-
-文本内容：
-{ocr_text}
-
-请按以下 JSON 格式输出（只输出JSON，不要其他文字）：
-{{
-  "rows": [
-    {{
-      "product_name": "商品名称",
-      "quantity": "数量",
-      "unit": "单位",
-      "price": "价格",
-      "customer": "客户名称"
-    }}
-  ]
-}}
-如果某些字段不存在，请忽略。
-"""
-        else:
-            # 策略 B: 通用领域 - 通用表格提取
-            extraction_prompt = f"""
-请从以下文本（Markdown 格式）中提取表格数据。
-
-文本内容：
-{ocr_text}
-
-任务：将 Markdown 表格或列表转换为 JSON 数据。
-规则：
-1. 识别每一行，转换为 JSON 对象。
-2. 键值对列表（如 `Key | Value`）转换为多行数据：`{{ "key": "...", "value": "..." }}`。
-3. 字段命名使用 snake_case。
-
-请按以下 JSON 格式输出（只输出JSON）：
-{{
-  "rows": [
-    {{
-      "field_key_1": "value_1",
-      "field_key_2": "value_2",
-      ...
-    }}
-  ]
-}}
-"""
-        
-        messages = [
-            {"role": "system", "content": "你是数据提取专家。"},
-            {"role": "user", "content": extraction_prompt}
-        ]
-        
-        extraction_result = await llm_service.call_main_model(messages, temperature=0.3)
-        
-        # 解析提取结果
-        try:
-            import re
-            json_match = re.search(r'\{.*\}', extraction_result, re.DOTALL)
-            if json_match:
-                extracted_data = json.loads(json_match.group())
+    if task_type == "extract":
+        if file_name:
+            ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
+            if ext in ['xlsx', 'xls', 'csv']:
+                state["next_node"] = "excel_node"
+            elif ext in ['docx', 'doc']:
+                state["next_node"] = "word_node"
+            elif ext in ['pdf']:
+                state["next_node"] = "ocr_node"
+            elif ext in ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']:
+                state["next_node"] = "ocr_node"
+            elif ext in ['pptx', 'ppt']:
+                state["next_node"] = "ocr_node"
             else:
-                extracted_data = json.loads(extraction_result)
-            
-            logger.info(f"[Visual Flow] 提取到 {len(extracted_data.get('rows', []))} 行数据")
-            await notify_step_end(state, "extraction", f"提取到 {len(extracted_data.get('rows', []))} 行数据")
-        except json.JSONDecodeError as e:
-            logger.error(f"[Visual Flow] JSON 解析失败: {str(e)}")
-            extracted_data = {"rows": []}
-            await notify_log(state, "extraction", "数据提取格式错误")
-
-        
-        # ========== Step 4: 条件校准 ==========
-        should_calibrate = analysis_result.should_calibrate
-        matched_skills = analysis_result.matched_skills
-        
-        if should_calibrate:
-            state['current_step'] = 'calibration'
-            logger.info(f"[Visual Flow] 开始校准，使用 Skills: {matched_skills}")
-            await notify_step_start(state, "calibration", "正在进行知识库校准...")
+                state["next_node"] = "ocr_node"
         else:
-            await notify_step_start(state, "filling", "正在整理数据...")
-        
-        # ... (映射和校准逻辑) ...
-        label_map = {
-            "product_name": "商品名称", "quantity": "数量", "unit": "单位", 
-            "price": "单价", "customer": "客户", "stock_quantity": "库存数量", "warehouse": "仓库"
-        }
-        key_to_category = {
-            "product_name": "product", "customer": "customer", "unit": "unit", "warehouse": "warehouse"
-        }
-        
-        calibrated_rows = []
-        ambiguous_items = []
-        
-        raw_rows = extracted_data.get('rows', [])
-        total_items = len(raw_rows)
-        
-        for row_idx, row in enumerate(raw_rows):
-            calibrated_row_items: List[Dict[str, Any]] = []
-            
-            # 简单的进度通知
-            if should_calibrate and row_idx % 2 == 0:
-                await notify_log(state, "calibration", f"正在校准第 {row_idx + 1}/{total_items} 行...")
-            
-            for key, value in row.items():
-                if not value: continue
-                
-                calibrated = str(value)
-                confidence = 1.0
-                is_amb = False
-                candidates = None
-                
-                if should_calibrate:
-                    category = key_to_category.get(key)
-                    # 只有匹配到对应 Skill 的字段才校准
-                    skill_id_for_category = None
-                    for sid in matched_skills:
-                        skill = skill_registry.get_skill(sid)
-                        if skill and skill.category == category:
-                            skill_id_for_category = sid
-                            break
-                    
-                    if skill_id_for_category:
-                        calibrated, confidence, is_amb, candidates = await vector_store.calibrate_text(
-                            str(value), category=category
-                        )
-                
-                label = label_map.get(key, key.replace('_', ' ').title())
-                
-                calibrated_row_items.append({
-                    "key": key,
-                    "label": label,
-                    "value": calibrated,
-                    "original_text": str(value),
-                    "confidence": float(confidence),
-                    "is_ambiguous": bool(is_amb),
-                    "candidates": candidates if is_amb else None,
-                    "data_type": "string",
-                })
-                
-                if is_amb and candidates:
-                    ambiguous_items.append({
-                        "row_index": row_idx,
-                        "key": key,
-                        "original": value,
-                        "candidates": candidates
-                    })
-            
-            if calibrated_row_items:
-                calibrated_rows.append(calibrated_row_items)
-        
-        if should_calibrate:
-            await notify_step_end(state, "calibration", "校准完成")
-        
-        # ========== Step 5: 填充表格 ==========
-        state['current_step'] = 'filling'
-        await notify_step_start(state, "filling", "正在生成表格...")
-        
-        state['form_data'] = {"rows": calibrated_rows}
-        state['ambiguous_items'] = ambiguous_items
-        state['ambiguity_flag'] = len(ambiguous_items) > 0
-        
-        await notify_step_end(state, "filling", "处理全部完成")
-        
-        state['messages'].append(AIMessage(content=f"识别完成！共 {len(calibrated_rows)} 行数据。"))
-        state['next_action'] = 'end'
-        
-    except Exception as e:
-        logger.error(f"[Visual Flow] 处理失败: {str(e)}")
-        state['error'] = str(e)
-        state['messages'].append(AIMessage(content=f"处理失败: {str(e)}"))
-        state['next_action'] = 'end'
-        await notify_log(state, "error", f"处理异常: {str(e)}")
+            state["error"] = "缺少文件"
+            state["next_node"] = "end"
+    elif task_type == "audio":
+        state["next_node"] = "audio_node"
+    elif task_type == "chat":
+        state["next_node"] = "chat_node"
+    else:
+        state["error"] = f"未知任务类型: {task_type}"
+        state["next_node"] = "end"
     
+    logger.info(f"[Router] Next node: {state.get('next_node')}")
     return state
 
 
-async def audio_flow_node(state: AgentState) -> AgentState:
+async def ocr_node(state: AgentState) -> AgentState:
     """
-    音频流节点 - 处理语音指令
-    流程：ASR识别 → 发送用户消息 → 意图理解 → 工具调用 → 回复
+    OCR 节点 - 智能视觉识别（自动检测手写/打印体）
     """
-    logger.info("[Audio Flow] 开始处理语音指令")
+    from app.services.aliyun_ocr import ocr_service
+    
+    logger.info(f"[OCR] Processing task {state['task_id']}")
     
     try:
-        # Step 1: ASR 识别
-        await notify_step_start(state, "ocr", "正在聆听语音指令...")
+        file_content = state.get("file_content")
+        if not file_content:
+            raise ValueError("缺少文件内容")
         
-        audio_data = state.get('audio_data')
-        if not audio_data:
-            raise ValueError("没有收到音频数据")
+        # 1. 检测内容类型（手写/打印/混合）
+        await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
+            "role": "agent",
+            "content": "🔍 正在分析图片内容类型..."
+        })
+        
+        content_type = await ocr_service.detect_content_type(image_data=file_content)
+        logger.info(f"[OCR] Content type: {content_type}")
+        
+        # 2. 根据内容类型选择识别方法
+        ocr_notes = []
+        
+        if content_type == "handwriting":
+            # 手写体：使用带简化字提示的订单识别
+            await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
+                "role": "agent",
+                "content": "✍️ 检测到手写内容，正在进行智能识别..."
+            })
+            ocr_text, ocr_notes = await ocr_service.recognize_order_handwriting(image_data=file_content)
             
-        asr_text = await asr_service.recognize_audio(audio_data)
-        state['asr_text'] = asr_text
+        elif content_type == "printed":
+            # 打印体：使用通用识别
+            await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
+                "role": "agent",
+                "content": "📄 检测到打印内容，正在进行文字识别..."
+            })
+            ocr_text = await ocr_service.recognize_general(image_data=file_content)
+            
+        else:
+            # 混合：使用手写订单识别（更全面）
+            await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
+                "role": "agent",
+                "content": "📝 检测到混合内容，正在进行智能识别..."
+            })
+            ocr_text, ocr_notes = await ocr_service.recognize_order_handwriting(image_data=file_content)
         
-        logger.info(f"[Audio Flow] ASR 识别结果: {asr_text}")
-        await notify_step_end(state, "ocr", f"语音识别完成")
+        state["ocr_text"] = ocr_text
+        state["ocr_notes"] = ocr_notes  # 保存识别备注供后续校对参考
+        state["content_type"] = content_type
         
-        # 重要：将用户的语音内容作为"用户消息"推送给前端聊天框
-        if state.get('client_id'):
-            await manager.send_to_client(state['client_id'], {
-                "type": "user_voice_text",  # 前端需要监听此类型，显示为用户消息
-                "content": asr_text,
-                "timestamp": _iso_now()
+        # 3. 如果有识别备注，通知前端
+        if ocr_notes:
+            await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
+                "role": "agent",
+                "content": f"📋 识别备注: {'; '.join(ocr_notes)}"
             })
         
-        # Step 2: 意图理解与工具调用
-        state['current_step'] = 'analyzing'
-        await notify_step_start(state, "analyzing", "正在理解指令...")
+        logger.info(f"[OCR] Result ({content_type}): {ocr_text[:100] if ocr_text else 'empty'}...")
         
-        # 构造 LLM 请求
-        system_prompt = """你是一个智能表单助手，可以帮助用户修改和操作表格数据。
-你可以使用以下工具：
-1. update_cell(row_index: int, key: str, value: Any): 更新指定单元格的值。
-   - row_index: 行号，从 0 开始。用户说"第一行"对应 row_index=0。
-   - key: 字段的键名（如 product_name, quantity, price, unit, customer 等）。
-   - value: 新的值。
+        state["next_node"] = "llm_node"
+        
+    except Exception as e:
+        logger.error(f"[OCR] Failed: {str(e)}")
+        state["error"] = str(e)
+        state["next_node"] = "end"
+    
+    return state
 
-用户的指令通常是基于当前表格的修改操作。
-请准确识别行号和字段名。
 
-如果是修改指令，请输出 JSON 格式的工具调用，格式如下：
-{
-    "tool": "update_cell",
-    "params": {
-        "row_index": 0,
-        "key": "quantity",
-        "value": "100"
-    }
-}
+async def excel_node(state: AgentState) -> AgentState:
+    """
+    Excel 节点 - 使用 FastTools 直接解析 Excel/CSV
+    """
+    from app.agents.tools.fast_tools import fast_tools
+    
+    logger.info(f"[Excel] Processing task {state['task_id']}")
+    
+    try:
+        file_content = state.get("file_content")
+        file_name = state.get("file_name", "")
+        
+        if not file_content:
+            raise ValueError("缺少文件内容")
+        
+        # 使用 FastTools 解析
+        result = fast_tools.parse_excel(file_content, file_name)
+        
+        if result.success:
+            state["extracted_rows"] = result.rows
+            logger.info(f"[Excel] Extracted {len(result.rows)} rows via FastTools")
+            state["next_node"] = "push_rows_node"
+        else:
+            state["error"] = result.message
+            state["next_node"] = "end"
+        
+    except Exception as e:
+        logger.error(f"[Excel] Failed: {str(e)}")
+        state["error"] = str(e)
+        state["next_node"] = "end"
+    
+    return state
 
-如果是普通对话或无法理解的指令，请直接回复文本（不要 JSON）。
-"""
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"用户语音指令：{asr_text}"}
-        ]
+
+async def word_node(state: AgentState) -> AgentState:
+    """
+    Word 节点 - 使用 FastTools 解析 Word 文档
+    """
+    from app.agents.tools.fast_tools import fast_tools
+    
+    logger.info(f"[Word] Processing task {state['task_id']}")
+    
+    try:
+        file_content = state.get("file_content")
+        if not file_content:
+            raise ValueError("缺少文件内容")
         
-        # 调用 LLM
-        response_content = await llm_service.call_main_model(messages)
+        # 使用 FastTools 解析
+        result = fast_tools.parse_word(file_content)
         
-        # 尝试解析 JSON 工具调用
-        clean_content = response_content.replace("```json", "").replace("```", "").strip()
+        if result.success:
+            if result.rows:
+                state["extracted_rows"] = result.rows
+                state["next_node"] = "push_rows_node"
+                logger.info(f"[Word] Extracted {len(result.rows)} rows via FastTools")
+            elif result.source_type == 'word_text':
+                # 没有表格，提取的是文本，交给 LLM
+                state["ocr_text"] = result.message
+                state["next_node"] = "llm_node"
+                logger.info(f"[Word] No tables, extracted text for LLM")
+            else:
+                state["error"] = "Word 文档为空"
+                state["next_node"] = "end"
+        else:
+            state["error"] = result.message
+            state["next_node"] = "end"
         
-        reply_content = response_content
+    except Exception as e:
+        logger.error(f"[Word] Failed: {str(e)}")
+        state["error"] = str(e)
+        state["next_node"] = "end"
+    
+    return state
+
+
+async def llm_node(state: AgentState) -> AgentState:
+    """
+    LLM 节点 - 将文本转换为结构化 JSON
+    """
+    from app.agents.nodes.llm_node import format_to_json
+    
+    logger.info(f"[LLM] Processing task {state['task_id']}")
+    
+    try:
+        ocr_text = state.get("ocr_text", "")
+        if not ocr_text:
+            raise ValueError("没有待处理的文本")
         
-        if clean_content.startswith("{") and "tool" in clean_content:
+        await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
+            "role": "agent",
+            "content": "正在提取结构化数据..."
+        })
+        
+        # 格式化为 JSON
+        rows = []
+        async for row in format_to_json(ocr_text):
+            if "_error" not in row:
+                rows.append(row)
+        
+        state["extracted_rows"] = rows
+        state["next_node"] = "push_rows_node"
+        
+        logger.info(f"[LLM] Extracted {len(rows)} rows")
+        
+    except Exception as e:
+        logger.error(f"[LLM] Failed: {str(e)}")
+        state["error"] = str(e)
+        state["next_node"] = "end"
+    
+    return state
+
+
+async def push_rows_node(state: AgentState) -> AgentState:
+    """
+    推送行节点 - 逐行推送数据到前端
+    """
+    from app.core.templates import DEFAULT_SCHEMA, map_row_to_template
+    
+    logger.info(f"[PushRows] Task {state['task_id']}")
+    
+    raw_rows = state.get("extracted_rows", [])
+    table_id = state.get("table_id")
+    client_id = state["client_id"]
+    
+    if not raw_rows:
+        await push_event(client_id, EventType.CHAT_MESSAGE, {
+            "role": "agent",
+            "content": "⚠️ 未能提取到有效数据"
+        })
+        state["next_node"] = "end"
+        return state
+    
+    # 强制使用固定 Schema
+    schema = DEFAULT_SCHEMA
+    
+    # 发送 TABLE_REPLACE 来更新 schema（使用空数据），让前端准备好接收
+    if table_id:
+        await push_event(client_id, EventType.TABLE_REPLACE, {
+            "table_id": table_id,
+            "rows": [],  # 先清空，后面逐行添加
+            "schema": schema,
+        })
+    else:
+        # 如果没有指定 table_id，让前端创建新表
+        await push_event(client_id, EventType.TABLE_CREATE, {
+            "title": f"导入数据 - {state.get('file_name', '未命名')}",
+            "source": state.get("file_name"),
+            "schema": schema,
+        })
+        table_id = "new"  # 这是一个占位符，实际上前端可能会返回真实的 table_id，或者通过 active_table 同步
+    
+    # 逐行清洗并推送
+    valid_rows = []
+    for idx, raw_row in enumerate(raw_rows):
+        # 无论数据来源（Excel/OCR），都映射到标准模板
+        normalized_row = map_row_to_template(raw_row)
+        await push_row(client_id, table_id, normalized_row, idx)
+        valid_rows.append(normalized_row)
+    
+    # 更新 state 中的 extracted_rows 为标准化后的数据，供 calibration_node 使用
+    state["extracted_rows"] = valid_rows
+    
+    await push_event(client_id, EventType.CHAT_MESSAGE, {
+        "role": "agent",
+        "content": f"✅ 已提取 {len(valid_rows)} 行数据"
+    })
+    
+    state["next_node"] = "calibration_node"
+    return state
+
+
+async def calibration_node(state: AgentState) -> AgentState:
+    """
+    校准节点 - 程序检索 + Turbo 模型智能校对
+    
+    三层校对流程：
+    1. 程序快速检索：从知识库找候选商品（<30ms）
+    2. Turbo 模型智能校对：结合候选列表进行字形/拼音/语义分析
+    3. 阈值判断：根据置信度分级输出建议
+    """
+    from app.services.knowledge_base import vector_store
+    from app.services.aliyun_llm import llm_service
+    from app.services.handwriting_hints import CalibrationThresholds
+    
+    logger.info(f"[Calibration] Task {state['task_id']}")
+    
+    rows = state.get("extracted_rows", [])
+    client_id = state["client_id"]
+    table_id = state.get("table_id", "new")
+    content_type = state.get("content_type", "unknown")  # 内容类型（手写/打印）
+    ocr_notes = state.get("ocr_notes", [])  # OCR 阶段的识别备注
+    
+    if not rows:
+        state["next_node"] = "end"
+        return state
+    
+    # 通知前端：开始校对
+    await push_event(client_id, EventType.CHAT_MESSAGE, {
+        "role": "agent",
+        "content": "🔍 正在进行智能校对..."
+    })
+    
+    # 在标准 Schema 中，识别商品字段名
+    product_field = "识别商品"
+    
+    calibration_count = 0
+    need_llm_review = []  # 需要 LLM 复核的项
+    
+    # === 第一轮：程序快速检索 ===
+    for idx, row in enumerate(rows):
+        order_product = ""  # 订单商品（校对结果）
+        note = ""  # 备注提示
+        product_name = row.get(product_field, "")
+        
+        if product_name:
             try:
-                tool_call = json.loads(clean_content)
+                # 程序快速检索候选
+                result = await vector_store.calibrate(str(product_name))
+                confidence_level = CalibrationThresholds.get_level(result.confidence)
+                
+                if confidence_level == 'high':
+                    # 高置信度：直接填入匹配的商品名
+                    order_product = result.calibrated
+                    if result.product and result.product.price == 0:
+                        note = f"⚠️ 无价格"
+                    
+                elif confidence_level == 'medium':
+                    # 中等置信度：填入建议，标记需要复核
+                    order_product = f"✅ {result.calibrated}"
+                    need_llm_review.append({
+                        "idx": idx,
+                        "original": product_name,
+                        "candidates": [result.calibrated] + (result.candidates or [])[:4],
+                        "confidence": result.confidence
+                    })
+                    
+                elif confidence_level == 'low':
+                    # 低置信度：列出候选，需要 LLM 复核
+                    if result.candidates:
+                        order_product = f"❓ 可能是: {', '.join(result.candidates[:3])}"
+                        need_llm_review.append({
+                            "idx": idx,
+                            "original": product_name,
+                            "candidates": result.candidates[:5],
+                            "confidence": result.confidence
+                        })
+                    else:
+                        order_product = f"❓ 请核对"
+                        
+                else:
+                    # 极低置信度：直接标记为未找到
+                    order_product = f"❌ 库中未找到，请手动填写"
+                    
+            except Exception as e:
+                logger.debug(f"[Calibration] KB match failed for row {idx}: {str(e)}")
+                order_product = f"❓ 校对失败"
+        
+        # 数据合理性校验
+        qty = row.get("数量")
+        if isinstance(qty, (int, float)) and qty < 0:
+            note = f"⚠️ 数量为负数: {qty}" if not note else f"{note}; 数量为负数"
+            
+        # 推送"订单商品"列
+        if order_product:
+            calibration_count += 1
+            await push_event(client_id, EventType.CELL_UPDATE, {
+                "table_id": table_id,
+                "row_index": idx,
+                "col_key": "订单商品",
+                "value": order_product
+            })
+        
+        # 如果有额外备注，更新 calibrationNotes（用于前端底部面板显示）
+        if note:
+            await push_event(client_id, EventType.CELL_UPDATE, {
+                "table_id": table_id,
+                "row_index": idx,
+                "col_key": "_calibration_note",
+                "value": note
+            })
+    
+    # === 第二轮：LLM 智能复核（仅对需要复核的项）===
+    if need_llm_review and content_type in ["handwriting", "mixed"]:
+        await push_event(client_id, EventType.CHAT_MESSAGE, {
+            "role": "agent",
+            "content": f"🤖 正在进行 AI 智能校对 ({len(need_llm_review)} 项)..."
+        })
+        
+        for item in need_llm_review:
+            try:
+                # 构建 Turbo 校对 prompt
+                candidates_str = "\n".join([f"  - {c}" for c in item['candidates']])
+                prompt = f"""你是一个商品名称校对专家。请根据以下信息判断识别结果是否正确。
+
+【OCR识别结果】{item['original']}
+【候选商品列表】
+{candidates_str}
+
+【任务】
+1. 分析 OCR 结果与候选商品的相似度（考虑字形、拼音、手写简化等因素）
+2. 如果能确定匹配，回复格式：✅ 建议：「原文」→「正确商品名」
+3. 如果有多个可能，回复格式：❓ 可能是：商品A 或 商品B
+4. 如果完全无法匹配，回复格式：❌ 未找到匹配，请手动校对
+
+【注意】
+- 手写中 "歺" 常代表 "餐"
+- 手写中 "与" 形状可能是 "歺"
+- 只回复一行建议，不要解释"""
+
+                llm_result = await llm_service.call_calibration_model(prompt)
+                llm_result = llm_result.strip()
+                
+                # 更新"订单商品"列（LLM 智能校对结果）
+                if llm_result:
+                    calibration_count += 1
+                    await push_event(client_id, EventType.CELL_UPDATE, {
+                        "table_id": table_id,
+                        "row_index": item['idx'],
+                        "col_key": "订单商品",
+                        "value": llm_result
+                    })
+                    
+            except Exception as e:
+                logger.error(f"[Calibration] LLM review failed for row {item['idx']}: {str(e)}")
+    
+    # 通知前端：校对完成
+    total_rows = len(rows)
+    if calibration_count > 0:
+        await push_event(client_id, EventType.CHAT_MESSAGE, {
+            "role": "agent",
+            "content": f"✅ 校对完成: {total_rows} 行数据，{calibration_count} 条建议"
+        })
+    else:
+        await push_event(client_id, EventType.CHAT_MESSAGE, {
+            "role": "agent",
+            "content": f"✅ 校对完成: {total_rows} 行数据，无异常"
+        })
+    
+    state["next_node"] = "end"
+    return state
+
+
+async def audio_node(state: AgentState) -> AgentState:
+    """
+    音频节点 - 语音识别和指令处理
+    """
+    from app.services.aliyun_asr import asr_service
+    from app.services.aliyun_llm import llm_service
+    
+    logger.info(f"[Audio] Processing task {state['task_id']}")
+    
+    try:
+        file_content = state.get("file_content")
+        if not file_content:
+            raise ValueError("缺少音频内容")
+        
+        # ASR 识别
+        asr_text = await asr_service.recognize_audio(file_content)
+        logger.info(f"[Audio] ASR result: {asr_text}")
+        
+        # 推送用户语音文本
+        await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
+            "role": "user",
+            "content": asr_text,
+            "is_voice": True
+        })
+        
+        # LLM 理解指令
+        system_prompt = """你是智能表单助手。分析用户指令，输出 JSON 工具调用。
+
+可用工具：
+- update_cell: {"tool": "update_cell", "params": {"row_index": 0, "key": "字段名", "value": "新值"}}
+- add_row: {"tool": "add_row", "params": {"data": {"product": "商品", "quantity": 10}}}
+- delete_row: {"tool": "delete_row", "params": {"row_index": 0}}
+
+如果不是操作指令，直接回复文本。"""
+        
+        response = await llm_service.call_main_model([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": asr_text}
+        ])
+        
+        # 解析响应
+        clean = response.strip().replace("```json", "").replace("```", "").strip()
+        
+        if clean.startswith("{") and "tool" in clean:
+            try:
+                tool_call = json.loads(clean)
                 tool_name = tool_call.get("tool")
                 params = tool_call.get("params", {})
                 
-                if tool_name == "update_cell":
-                    row_idx = params.get("row_index", 0)
-                    key = params.get("key", "")
-                    value = params.get("value", "")
-                    
-                    # 发送工具调用通知给前端（前端会据此更新表格）
-                    if state.get('client_id'):
-                        await manager.send_to_client(state['client_id'], {
-                            "type": "tool_action",
-                            "content": f"根据语音指令修改第 {row_idx + 1} 行...",
-                            "tool": "update_cell",
-                            "params": {
-                                "rowIndex": row_idx,
-                                "key": key,
-                                "value": value
-                            },
-                            "timestamp": _iso_now()
-                        })
-                    
-                    reply_content = f"好的，已将第 {row_idx + 1} 行的「{key}」修改为「{value}」。"
+                await push_event(state["client_id"], EventType.TOOL_CALL, {
+                    "tool": tool_name,
+                    "params": params
+                })
+                
+                await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
+                    "role": "agent",
+                    "content": f"已执行: {tool_name}"
+                })
             except json.JSONDecodeError:
-                logger.warning(f"[Audio Flow] 无法解析 LLM 返回的 JSON: {clean_content}")
-        
-        await notify_step_end(state, "analyzing", "指令处理完成")
-        
-        # 添加回复消息到状态
-        state['messages'].append(AIMessage(content=reply_content))
-        
-        # 推送最终回复给前端聊天框（显示为 AI 回复）
-        if state.get('client_id'):
-            await manager.send_to_client(state['client_id'], {
-                "type": "agent_thought",
-                "content": reply_content,
-                "status": "done",
-                "timestamp": _iso_now()
+                await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
+                    "role": "agent",
+                    "content": response
+                })
+        else:
+            await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
+                "role": "agent",
+                "content": response
             })
-
+        
     except Exception as e:
-        logger.error(f"[Audio Flow] 处理失败: {str(e)}")
-        state['error'] = str(e)
-        error_msg = f"抱歉，语音处理出错了: {str(e)}"
-        state['messages'].append(AIMessage(content=error_msg))
-        
-        if state.get('client_id'):
-            await manager.send_to_client(state['client_id'], {
-                "type": "agent_thought",
-                "content": error_msg,
-                "status": "error",
-                "timestamp": _iso_now()
-            })
-        
-        await notify_log(state, "error", f"语音处理异常: {str(e)}")
+        logger.error(f"[Audio] Failed: {str(e)}")
+        state["error"] = str(e)
     
-    state['next_action'] = 'end'
+    state["next_node"] = "end"
     return state
 
 
-# ========== 条件边函数 ==========
+async def chat_node(state: AgentState) -> AgentState:
+    """
+    聊天节点 - 使用 Function Calling 让大模型决定调用工具
+    
+    流程：
+    1. 所有用户消息 + 工具定义 发给主控大模型
+    2. 大模型决定：调用工具 or 直接回复
+    3. 如果调用工具，执行后返回结果给用户
+    """
+    from app.services.aliyun_llm import llm_service
+    from app.agents.context_manager import context_manager
+    from app.agents.tools.fast_tools import fast_tools
+    
+    logger.info(f"[Chat] Processing task {state['task_id']}")
+    
+    client_id = state["client_id"]
+    text = state.get("text_content", "")
+    table_context = state.get("table_context")
+    table_id = state.get("table_id")
+    
+    try:
+        if not text:
+            raise ValueError("缺少聊天内容")
+        
+        # 获取会话上下文
+        ctx = context_manager.get_context(client_id)
+        ctx.add_user_message(text)
+        
+        # 构建表格上下文描述
+        table_info = "【当前画布上的表格】\n"
+        if table_context and table_context.get("tables"):
+            tables = table_context.get("tables", {})
+            active_table_id = table_context.get("activeTableId")
+            
+            if not tables:
+                table_info += "暂无表格\n"
+            else:
+                for idx, (tid, table) in enumerate(tables.items()):
+                    rows = table.get("rows", [])
+                    is_active = "(当前激活)" if tid == active_table_id else ""
+                    table_info += f"{idx+1}. ID: {tid} | 标题: {table.get('title', '未命名')} | {len(rows)} 行数据 {is_active}\n"
+                    
+                    # 如果是激活的表格，展示部分数据作为参考
+                    if tid == active_table_id and rows:
+                        sample_rows = rows[:3]
+                        table_info += f"   示例数据: {json.dumps(sample_rows, ensure_ascii=False)[:500]}\n"
+        else:
+            table_info += "暂无表格信息\n"
+        
+        # 系统提示词
+        system_prompt = f"""你是智能订单助手，帮助用户处理订单和商品数据。
 
-def route_by_action(state: AgentState) -> str:
-    """根据 next_action 路由"""
-    action = state.get('next_action', 'end')
-    if action == 'visual_flow':
-        return 'visual_flow'
-    elif action == 'audio_flow':
-        return 'audio_flow'
+【对话历史】
+{ctx.get_context_for_llm(n=5)}
+{table_info}
+
+【你可以做的】
+- **智能填表**：如果用户发来一段包含商品和数量的文本（如"土豆 50斤，白菜 20斤"），请直接调用 `smart_fill` 工具，将用户输入的原始文本原样传进去，不要自行提取。
+- **查询商品**：如果用户问"有没有土豆"或"土豆多少钱"，请调用 `query_product`。
+- **操作表格**：新建表格、添加行、删除行、修改单元格。
+- **统计计算**：计算总价、数量合计等。
+- 闲聊咨询直接回复即可。
+
+【暂不支持的操作】
+以下操作需要用户手动在界面上完成，如果用户尝试这些操作，请友好提示：
+- 导出表格/下载订单 → 请点击顶部"导出全部"按钮，或右键菜单"导出此 Sheet"
+- 关闭/删除表格 → 请点击 Tab 页签上的 X 按钮
+- 修改订单日期/时间 → 请在表格上方的时间输入框中修改
+- 选择客户/餐厅/订单类型 → 请使用表格上方的下拉框选择
+
+用简洁友好的中文回复。"""
+
+        # 定义可用工具
+        tools = _get_chat_tools()
+        
+        # 调用带工具的主控大模型
+        result = await llm_service.call_with_tools(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            tools=tools
+        )
+        
+        # 处理结果
+        if result.get("tool_calls"):
+            # 大模型决定调用工具
+            tool_responses = []
+            for tool_call in result["tool_calls"]:
+                tool_name = tool_call["name"]
+                tool_args = tool_call.get("arguments", {})
+                
+                # 解析参数（可能是 JSON 字符串）
+                if isinstance(tool_args, str):
+                    try:
+                        tool_args = json.loads(tool_args)
+                    except:
+                        tool_args = {}
+                
+                logger.info(f"[Chat] Executing tool: {tool_name} with args: {tool_args}")
+                
+                # 执行工具
+                tool_result = await _execute_tool(
+                    tool_name, tool_args, client_id, table_id, table_context, fast_tools
+                )
+                tool_responses.append(tool_result)
+            
+            # 合并工具结果作为回复
+            final_response = "\n\n".join(tool_responses)
+        else:
+            # 直接使用文本回复
+            final_response = result.get("content", "")
+        
+        if final_response:
+            await push_event(client_id, EventType.CHAT_MESSAGE, {
+                "role": "agent",
+                "content": final_response
+            })
+            ctx.add_agent_message(final_response)
+        
+    except Exception as e:
+        logger.error(f"[Chat] Failed: {str(e)}")
+        await push_event(client_id, EventType.CHAT_MESSAGE, {
+            "role": "agent",
+            "content": f"抱歉，处理消息时出错了：{str(e)}"
+        })
+        state["error"] = str(e)
+    
+    state["next_node"] = "end"
+    return state
+
+
+def _get_chat_tools() -> List[Dict]:
+    """获取聊天可用的工具定义"""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "create_table",
+                "description": "创建一个新的表格。当用户说'新建表格'、'创建表格'、'建一个表'时调用",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "表格标题，如'商品订单'、'采购清单'"
+                        }
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "smart_fill",
+                "description": "智能填表工具。当用户在对话中发送一段包含订单信息的文本（如'我要土豆50斤，白菜30斤...'）时调用。请将用户的原始文本直接传给此工具，不要自行提取。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "用户输入的原始订单文本"
+                        },
+                        "table_id": {
+                            "type": "string",
+                            "description": "目标表格ID（可选）"
+                        }
+                    },
+                    "required": ["text"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_product",
+                "description": "从商品库中查询商品信息。当用户问'有没有XX'、'查一下XX'、'XX多少钱'时调用",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "product_name": {
+                            "type": "string",
+                            "description": "要查询的商品名称"
+                        }
+                    },
+                    "required": ["product_name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_total",
+                "description": "计算表格数据的统计信息。当用户问'总共多少钱'、'合计'、'统计'时调用",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["total", "count", "average"],
+                            "description": "计算类型：total(总价), count(数量), average(平均)"
+                        }
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "modify_cell",
+                "description": "修改表格中的某个单元格。当用户说'把XX改成YY'、'修改第X行'时调用",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "table_id": {
+                            "type": "string",
+                            "description": "目标表格ID。如果不指定，默认操作当前激活的表格；如果用户指定了特定表格（如'采购单'），请传入对应的ID"
+                        },
+                        "row_index": {
+                            "type": "integer",
+                            "description": "行号（从1开始）"
+                        },
+                        "column": {
+                            "type": "string",
+                            "description": "列名，如'商品名称'、'数量'、'单价'"
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "新的值"
+                        }
+                    },
+                    "required": ["row_index", "column", "value"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "add_row",
+                "description": "向表格添加一行数据。当用户说'添加一行'、'加上XX'时调用",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "table_id": {
+                            "type": "string",
+                            "description": "目标表格ID。如果不指定，默认操作当前激活的表格"
+                        },
+                        "data": {
+                            "type": "object",
+                            "description": "行数据，如 {\"商品名称\": \"苹果\", \"数量\": 10}"
+                        }
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_row",
+                "description": "删除表格中的一行。当用户说'删除第X行'、'去掉最后一行'时调用",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "table_id": {
+                            "type": "string",
+                            "description": "目标表格ID。如果不指定，默认操作当前激活的表格"
+                        },
+                        "row_index": {
+                            "type": "integer",
+                            "description": "行号（从1开始），-1表示最后一行"
+                        }
+                    },
+                    "required": ["row_index"]
+                }
+            }
+        }
+    ]
+
+
+async def _execute_tool(
+    tool_name: str,
+    args: Dict,
+    client_id: str,
+    table_id: str,
+    table_context: dict,
+    fast_tools
+) -> str:
+    """执行工具并返回结果"""
+    
+    if tool_name == "create_table":
+        title = args.get("title", "新表格")
+        # 推送创建表格事件
+        await push_event(client_id, EventType.TOOL_CALL, {
+            "tool": "create_table",
+            "params": {"title": title}
+        })
+        return f"✅ 已为你创建表格「{title}」"
+    
+    elif tool_name == "query_product":
+        product_name = args.get("product_name", "")
+        if not product_name:
+            return "❓ 请告诉我要查询什么商品"
+        
+        products = fast_tools.quick_product_lookup(product_name, limit=5)
+        
+        if products:
+            result_lines = [f"🔍 关于「{product_name}」的查询结果：\n"]
+            for p in products[:5]:
+                price_info = f"¥{p['price']}" if p['price'] > 0 else "无价格信息"
+                result_lines.append(f"• **{p['name']}** - {p['unit']} - {price_info}")
+                if p.get('spec'):
+                    result_lines[-1] += f" ({p['spec']})"
+            return "\n".join(result_lines)
+        else:
+            return f"🔍 在商品库中未找到「{product_name}」相关商品"
+    
+    elif tool_name == "calculate_total":
+        if not table_context or not table_context.get("rows"):
+            return "📊 当前没有表格数据可供计算。请先选择一个表格。"
+        
+        from app.agents.consultative_agent import consultative_agent
+        operation = args.get("operation", "total")
+        calc_result = await consultative_agent.calculate(operation, table_context)
+        return calc_result.answer
+    
+    elif tool_name == "modify_cell":
+        row_index = args.get("row_index", 1) - 1  # 转为 0-based
+        column = args.get("column", "")
+        value = args.get("value", "")
+        target_table_id = args.get("table_id")
+        
+        # 优先使用工具参数中的 table_id，其次使用上下文中的 activeTableId，最后使用 table_id 参数
+        active_table_id = table_context.get("activeTableId") if table_context else None
+        final_table_id = target_table_id or active_table_id or table_id
+        
+        if not final_table_id:
+            return "❓ 请先选择要修改的表格"
+        
+        # 推送修改事件
+        await push_event(client_id, EventType.TOOL_CALL, {
+            "tool": "update_cell",
+            "params": {
+                "table_id": final_table_id,
+                "row_index": row_index,
+                "key": column,
+                "value": value
+            }
+        })
+        return f"✅ 已将第 {row_index + 1} 行的「{column}」改为「{value}」"
+    
+    elif tool_name == "smart_fill":
+        text = args.get("text", "")
+        target_table_id = args.get("table_id")
+        
+        active_table_id = table_context.get("activeTableId") if table_context else None
+        final_table_id = target_table_id or active_table_id or table_id
+        
+        if not final_table_id:
+            # 如果没有表格，生成一个临时的 ID
+            final_table_id = f"table_{generate_trace_id()[:8]}"
+            
+        # 1. 调用提取模型 (Turbo)
+        logger.info(f"[SmartFill] Extracting from text: {text[:50]}...")
+        extraction_prompt = UNSTRUCTURED_EXTRACTION_PROMPT.format(text=text)
+        
+        try:
+            extracted_json_str = await llm_service.call_extraction_model(extraction_prompt)
+            import json
+            extracted_rows = json.loads(extracted_json_str)
+            
+            if not isinstance(extracted_rows, list):
+                extracted_rows = [extracted_rows]
+                
+            logger.info(f"[SmartFill] Extracted {len(extracted_rows)} rows")
+            
+            if not extracted_rows:
+                return "⚠️ 未能从文本中提取到有效数据"
+
+            # 2. 逐行推送
+            valid_count = 0
+            for idx, raw_row in enumerate(extracted_rows):
+                # 映射到模板
+                normalized_row = map_row_to_template(raw_row)
+                if "识别商品" not in normalized_row and "品名" in raw_row:
+                    normalized_row["识别商品"] = raw_row["品名"]
+                
+                # 推送
+                await push_row(client_id, final_table_id, normalized_row, idx)
+                valid_count += 1
+                
+                # 3. 触发轻量级校对
+                try:
+                    product_name = normalized_row.get("识别商品", "")
+                    if product_name:
+                        from app.services.knowledge_base import vector_store
+                        from app.services.handwriting_hints import CalibrationThresholds
+                        
+                        result = await vector_store.calibrate(str(product_name))
+                        confidence_level = CalibrationThresholds.get_level(result.confidence)
+                        
+                        calibrated_field = "订单商品"
+                        note = ""
+                        
+                        if confidence_level == 'high':
+                            await push_event(client_id, EventType.CELL_UPDATE, {
+                                "table_id": final_table_id,
+                                "row_index": idx,
+                                "col_key": calibrated_field,
+                                "value": result.calibrated
+                            })
+                        elif confidence_level == 'medium':
+                            if result.suggestion:
+                                note = result.suggestion
+                        elif confidence_level == 'low':
+                            note = f"❓建议: {', '.join(result.candidates[:3])}" if result.candidates else "❓未找到"
+                        
+                        if note:
+                            await push_event(client_id, EventType.CELL_UPDATE, {
+                                "table_id": final_table_id,
+                                "row_index": idx,
+                                "col_key": calibrated_field,
+                                "value": note
+                            })
+                            await push_event(client_id, EventType.CALIBRATION_NOTE, {
+                                "table_id": final_table_id,
+                                "row_index": idx,
+                                "note": note,
+                                "severity": "warning"
+                            })
+                except Exception as e:
+                    logger.warning(f"[SmartFill] Calibration error for row {idx}: {e}")
+
+            return f"✅ 已成功提取并录入 {valid_count} 条数据"
+            
+        except Exception as e:
+            logger.error(f"[SmartFill] Failed: {e}")
+            return f"❌ 提取失败: {str(e)}"
+
+    elif tool_name == "add_row":
+        data = args.get("data", {})
+        target_table_id = args.get("table_id")
+        
+        active_table_id = table_context.get("activeTableId") if table_context else None
+        final_table_id = target_table_id or active_table_id or table_id
+        
+        if not final_table_id:
+            return "❓ 请先选择要添加数据的表格"
+        
+        await push_event(client_id, EventType.TOOL_CALL, {
+            "tool": "add_row",
+            "params": {
+                "table_id": final_table_id,
+                "data": data
+            }
+        })
+        return f"✅ 已添加一行数据"
+    
+    elif tool_name == "delete_row":
+        row_index = args.get("row_index", -1)
+        if row_index > 0:
+            row_index -= 1  # 转为 0-based
+        
+        target_table_id = args.get("table_id")
+        active_table_id = table_context.get("activeTableId") if table_context else None
+        final_table_id = target_table_id or active_table_id or table_id
+        
+        if not final_table_id:
+            return "❓ 请先选择要删除数据的表格"
+        
+        await push_event(client_id, EventType.TOOL_CALL, {
+            "tool": "delete_row",
+            "params": {
+                "table_id": final_table_id,
+                "row_index": row_index
+            }
+        })
+        row_desc = "最后一行" if row_index == -1 else f"第 {row_index + 1} 行"
+        return f"✅ 已删除{row_desc}"
+    
     else:
-        return 'end'
+        return f"❓ 未知工具: {tool_name}"
 
 
-# ========== 构建工作流图 ==========
+async def action_agent(state: AgentState) -> AgentState:
+    """
+    操作 Agent - 使用 AgentTools 处理增删改操作
+    
+    流程：
+    1. 使用意图分类器提取的参数（如果有）
+    2. 参数不完整时调用 LLM 补充
+    3. 执行工具并推送结果
+    """
+    from app.services.aliyun_llm import llm_service
+    from app.agents.tools.agent_tools import AgentTools, agent_tools, ToolCall
+    from app.agents.context_manager import context_manager
+    
+    logger.info(f"[ActionAgent] Processing task {state['task_id']}")
+    
+    text = state.get("text_content", "")
+    client_id = state["client_id"]
+    
+    try:
+        # 获取上下文
+        ctx = context_manager.get_context(client_id)
+        
+        # 生成工具定义 Prompt
+        tools_prompt = agent_tools.generate_tools_prompt()
+        
+        # 添加上下文信息
+        context_info = ""
+        if ctx.current_table_id:
+            context_info += f"\n当前表格: {ctx.current_table_id}"
+        if ctx.current_row_index is not None:
+            context_info += f"\n当前选中行: 第{ctx.current_row_index + 1}行"
+        
+        system_prompt = f"""你是智能表单操作助手。分析用户指令，输出 JSON 工具调用。
+
+{tools_prompt}
+
+{context_info}
+
+重要规则：
+1. "第一行"对应 row_index=0，"第二行"对应 row_index=1
+2. 如果缺少必要信息，使用 clarify 工具询问
+3. 字段名使用中文（如"商品名称"、"数量"、"单价"）"""
+        
+        # 调用 LLM 获取工具调用
+        response = await llm_service.call_main_model([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text}
+        ])
+        
+        # 解析工具调用
+        tool_call = agent_tools.parse_tool_call(response)
+        
+        if tool_call:
+            logger.info(f"[ActionAgent] Tool call: {tool_call.tool}, params: {tool_call.params}")
+            
+            # 检查是否是 clarify（需要澄清）
+            if tool_call.tool == "clarify":
+                question = tool_call.params.get("question", "请提供更多信息")
+                await push_event(client_id, EventType.CHAT_MESSAGE, {
+                    "role": "agent",
+                    "content": question
+                })
+                ctx.add_agent_message(question)
+            else:
+                # 执行工具
+                execution_context = {
+                    "current_table_id": ctx.current_table_id,
+                    "current_row_index": ctx.current_row_index,
+                }
+                result = await agent_tools.execute_tool(tool_call, execution_context)
+                
+                if result.get("success"):
+                    # 推送工具调用给前端
+                    await push_event(client_id, EventType.TOOL_CALL, {
+                        "tool": tool_call.tool,
+                        "params": tool_call.params
+                    })
+                    
+                    # 生成确认消息
+                    confirm_msg = agent_tools.generate_confirm_message(tool_call, result)
+                    await push_event(client_id, EventType.CHAT_MESSAGE, {
+                        "role": "agent",
+                        "content": confirm_msg
+                    })
+                    ctx.add_agent_message(confirm_msg, tool_call=tool_call.to_dict())
+                else:
+                    # 执行失败
+                    error_msg = result.get("message", "操作执行失败")
+                    await push_event(client_id, EventType.CHAT_MESSAGE, {
+                        "role": "agent",
+                        "content": f"❌ {error_msg}"
+                    })
+        else:
+            # 不是工具调用，直接返回 LLM 响应
+            await push_event(client_id, EventType.CHAT_MESSAGE, {
+                "role": "agent",
+                "content": response
+            })
+            ctx.add_agent_message(response)
+        
+    except Exception as e:
+        logger.error(f"[ActionAgent] Failed: {str(e)}")
+        state["error"] = str(e)
+        await push_event(client_id, EventType.CHAT_MESSAGE, {
+            "role": "agent",
+            "content": f"抱歉，操作执行出错: {str(e)}"
+        })
+    
+    state["next_node"] = "end"
+    return state
+
+
+async def end_node(state: AgentState) -> AgentState:
+    """
+    结束节点 - 发送任务完成/失败事件
+    """
+    task_id = state["task_id"]
+    client_id = state["client_id"]
+    error = state.get("error")
+    
+    if error:
+        await push_error(client_id, task_id, error)
+        await push_event(client_id, EventType.TASK_FINISH, {
+            "task_id": task_id,
+            "status": "error",
+            "error": error
+        })
+    else:
+        await push_event(client_id, EventType.TASK_FINISH, {
+            "task_id": task_id,
+            "status": "success"
+        })
+    
+    logger.info(f"[End] Task {task_id} finished, error={error}")
+    return state
+
+
+# ========== 条件路由 ==========
+
+def route_by_next_node(state: AgentState) -> str:
+    """根据 next_node 路由"""
+    return state.get("next_node", "end")
+
+
+# ========== 构建工作流 ==========
 
 def create_workflow() -> StateGraph:
     """创建 LangGraph 工作流"""
     
     workflow = StateGraph(AgentState)
     
-    # 添加节点
+    # 添加所有节点
     workflow.add_node("router", router_node)
-    workflow.add_node("visual_flow", visual_flow_node)
-    workflow.add_node("audio_flow", audio_flow_node)
+    workflow.add_node("ocr_node", ocr_node)
+    workflow.add_node("excel_node", excel_node)
+    workflow.add_node("word_node", word_node)
+    workflow.add_node("llm_node", llm_node)
+    workflow.add_node("push_rows_node", push_rows_node)
+    workflow.add_node("calibration_node", calibration_node)
+    workflow.add_node("audio_node", audio_node)
+    workflow.add_node("action_agent", action_agent)
+    workflow.add_node("chat_node", chat_node)
+    workflow.add_node("end", end_node)
     
-    # 设置入口点
+    # 设置入口
     workflow.set_entry_point("router")
     
-    # 添加条件边
+    # Router 的条件边
     workflow.add_conditional_edges(
         "router",
-        route_by_action,
+        route_by_next_node,
         {
-            "visual_flow": "visual_flow",
-            "audio_flow": "audio_flow",
-            "end": END
+            "ocr_node": "ocr_node",
+            "excel_node": "excel_node",
+            "word_node": "word_node",
+            "audio_node": "audio_node",
+            "chat_node": "chat_node",
+            "end": "end"
         }
     )
     
-    # 添加结束边
-    workflow.add_edge("visual_flow", END)
-    workflow.add_edge("audio_flow", END)
+    # OCR -> LLM
+    workflow.add_conditional_edges(
+        "ocr_node",
+        route_by_next_node,
+        {"llm_node": "llm_node", "end": "end"}
+    )
     
-    logger.info("LangGraph 工作流已创建")
+    # Excel -> Push
+    workflow.add_conditional_edges(
+        "excel_node",
+        route_by_next_node,
+        {"push_rows_node": "push_rows_node", "end": "end"}
+    )
     
+    # Word -> LLM or Push
+    workflow.add_conditional_edges(
+        "word_node",
+        route_by_next_node,
+        {"llm_node": "llm_node", "push_rows_node": "push_rows_node", "end": "end"}
+    )
+    
+    # LLM -> Push
+    workflow.add_conditional_edges(
+        "llm_node",
+        route_by_next_node,
+        {"push_rows_node": "push_rows_node", "end": "end"}
+    )
+    
+    # Push -> Calibration
+    workflow.add_conditional_edges(
+        "push_rows_node",
+        route_by_next_node,
+        {"calibration_node": "calibration_node", "end": "end"}
+    )
+    
+    # Calibration -> End
+    workflow.add_edge("calibration_node", "end")
+    
+    # Audio -> End
+    workflow.add_edge("audio_node", "end")
+    
+    # Chat -> Action Agent or End
+    workflow.add_conditional_edges(
+        "chat_node",
+        route_by_next_node,
+        {"action_agent": "action_agent", "end": "end"}
+    )
+    
+    # Action Agent -> End
+    workflow.add_edge("action_agent", "end")
+    
+    # End -> END
+    workflow.add_edge("end", END)
+    
+    logger.info("LangGraph workflow created (ComfyUI style)")
     return workflow
 
 
 # 编译工作流
 agent_graph = create_workflow().compile()
+
+
+# ========== 执行入口 ==========
+
+async def run_task(
+    task_id: str,
+    client_id: str,
+    task_type: str,
+    file_content: bytes = None,
+    file_name: str = None,
+    text_content: str = None,
+    table_id: str = None,
+    table_context: Dict[str, Any] = None,  # 表格上下文（用于咨询分析）
+) -> None:
+    """
+    执行任务 - 供 endpoints 调用
+    
+    Args:
+        task_id: 任务 ID
+        client_id: 客户端 ID
+        task_type: 任务类型 (extract/audio/chat)
+        file_content: 文件内容
+        file_name: 文件名
+        text_content: 文本内容
+        table_id: 目标表格 ID
+        table_context: 表格上下文（用于咨询分析）{title, rows, schema, metadata}
+    """
+    initial_state: AgentState = {
+        "task_id": task_id,
+        "client_id": client_id,
+        "task_type": task_type,
+        "file_content": file_content,
+        "file_name": file_name,
+        "text_content": text_content,
+        "ocr_text": None,
+        "ocr_notes": [],
+        "content_type": None,
+        "extracted_rows": [],
+        "table_id": table_id,
+        "table_context": table_context,  # 传递表格上下文
+        "next_node": None,
+        "error": None
+    }
+    
+    try:
+        await agent_graph.ainvoke(initial_state)
+    except Exception as e:
+        logger.error(f"[RunTask] Task {task_id} failed: {str(e)}")
+        await push_error(client_id, task_id, str(e))

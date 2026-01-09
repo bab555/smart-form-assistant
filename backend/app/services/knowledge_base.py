@@ -1,412 +1,358 @@
 """
-知识库服务 - Mock数据 + FAISS向量检索
+知识库服务 - 统一入口
+
+整合:
+1. 商品快速索引 (FastProductIndex)
+2. 分类管理
+3. Excel 导入导出
+4. 向量检索（兜底，可选）
 """
 import pickle
+import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
-import faiss
+from typing import List, Dict, Optional, Tuple, Any
+from io import BytesIO
+from datetime import datetime
+
 from app.core.config import settings
 from app.core.logger import app_logger as logger
-from app.services.aliyun_llm import llm_service
-from app.utils.helpers import calculate_text_similarity
+from app.services.product_index import (
+    FastProductIndex, Product, SearchResult, CalibrationResult, product_index
+)
+
+# 尝试导入 FAISS（可选，用于语义检索兜底）
+try:
+    import faiss
+    HAS_FAISS = True
+except ImportError:
+    HAS_FAISS = False
+    logger.warning("FAISS 未安装，语义检索功能不可用")
 
 
-class MockKnowledgeBase:
-    """Mock 知识库数据"""
+class KnowledgeBaseService:
+    """
+    知识库统一服务
     
-    # 商品数据库（Mock）
-    PRODUCTS = [
-        "红富士苹果", "黄金富士苹果", "嘎啦苹果", "红蛇果", "青苹果",
-        "香蕉", "进口香蕉", "国产香蕉", "芭蕉", "小米蕉",
-        "橙子", "脐橙", "血橙", "冰糖橙", "贡橙",
-        "西瓜", "无籽西瓜", "麒麟西瓜", "8424西瓜", "黑美人西瓜",
-        "草莓", "奶油草莓", "红颜草莓", "章姬草莓",
-        "葡萄", "巨峰葡萄", "夏黑葡萄", "阳光玫瑰葡萄", "红提", "青提",
-        "芒果", "台芒", "贵妃芒", "澳芒", "小台芒",
-        "榴莲", "金枕榴莲", "猫山王榴莲", "干尧榴莲",
-        "车厘子", "智利车厘子", "加拿大车厘子", "国产车厘子",
-        "火龙果", "红心火龙果", "白心火龙果", "黄心火龙果",
-        "猕猴桃", "红心猕猴桃", "绿心猕猴桃", "金果猕猴桃",
-        "梨", "雪花梨", "皇冠梨", "鸭梨", "香梨", "丰水梨",
-        "桃子", "水蜜桃", "油桃", "黄桃", "蟠桃",
-        "荔枝", "妃子笑荔枝", "桂味荔枝", "糯米糍荔枝",
-        "龙眼", "桂圆", "鲜龙眼",
-        "山竹", "进口山竹", "泰国山竹",
-        "菠萝", "凤梨", "台湾凤梨", "海南菠萝",
-        "椰子", "椰青", "老椰子", "海南椰子",
-        "柚子", "红心柚", "白心柚", "沙田柚", "蜜柚",
-        "石榴", "软籽石榴", "突尼斯石榴", "红石榴"
-    ]
-    
-    # 客户信息（Mock）
-    CUSTOMERS = [
-        "张三", "李四", "王五", "赵六", "刘七",
-        "北京水果批发商行", "上海鲜果汇", "广州果园", "深圳鲜果店",
-        "杭州水果超市", "成都果蔬市场", "武汉鲜果批发",
-        "南京果品公司", "重庆水果行", "西安鲜果汇"
-    ]
-    
-    # 单位（Mock）
-    UNITS = ["斤", "公斤", "箱", "件", "个", "袋", "筐"]
-    
-    # 供应商（Mock）
-    SUPPLIERS = [
-        "山东水果基地", "云南果园", "海南农场", "新疆果业",
-        "广西水果批发", "四川果蔬", "福建果园", "浙江农产品",
-        "进口水果直采", "智利水果进口商", "泰国水果供应商"
-    ]
-    
-    @classmethod
-    def get_all_entities(cls, category: Optional[str] = None) -> List[str]:
-        """
-        获取所有实体数据
-        
-        Args:
-            category: 类别筛选（product/customer/unit/supplier）
-            
-        Returns:
-            List[str]: 实体列表
-        """
-        if category == "product":
-            return cls.PRODUCTS
-        elif category == "customer":
-            return cls.CUSTOMERS
-        elif category == "unit":
-            return cls.UNITS
-        elif category == "supplier":
-            return cls.SUPPLIERS
-        else:
-            # 返回所有类别
-            return cls.PRODUCTS + cls.CUSTOMERS + cls.UNITS + cls.SUPPLIERS
-
-
-class VectorStoreService:
-    """FAISS 向量存储服务"""
+    提供:
+    - 商品检索 (快速索引优先)
+    - 商品校对
+    - 分类管理
+    - Excel 导入导出
+    """
     
     def __init__(self):
-        """初始化向量存储"""
-        self.index: Optional[faiss.IndexFlatL2] = None
-        self.metadata: List[Dict] = []
-        self.dimension: int = 1536  # text-embedding-v2 的维度
+        self.product_index = product_index
+        self.initialized = False
         
-        # 确保数据目录存在
+        # 数据目录
         self.data_dir = Path("./data")
         self.data_dir.mkdir(exist_ok=True)
         
-        self.index_path = Path(settings.FAISS_INDEX_PATH)
-        self.metadata_path = Path(settings.FAISS_METADATA_PATH)
+        # 持久化路径
+        self.index_path = self.data_dir / "product_index.pkl"
+        self.excel_path = self.data_dir / "商品库.xlsx"
     
     async def initialize(self, force_rebuild: bool = False):
         """
-        初始化向量库
+        初始化知识库
         
         Args:
             force_rebuild: 是否强制重建索引
         """
-        if force_rebuild or not self._index_exists():
-            logger.info("开始构建向量索引...")
-            await self._build_index()
+        if self.initialized and not force_rebuild:
+            logger.info("知识库已初始化，跳过")
+            return
+        
+        # 优先从持久化文件加载
+        if not force_rebuild and self.index_path.exists():
+            try:
+                self._load_index()
+                self.initialized = True
+                logger.info(f"✅ 知识库从缓存加载，共 {self.product_index.total_count} 条商品")
+                return
+            except Exception as e:
+                logger.warning(f"加载缓存失败: {str(e)}，将重建索引")
+        
+        # 从 Excel 构建索引
+        if self.excel_path.exists():
+            await self.import_from_excel(str(self.excel_path))
         else:
-            logger.info("加载已有向量索引...")
-            self._load_index()
+            # 尝试从项目根目录加载
+            root_excel = Path("./商品库.xlsx")
+            if root_excel.exists():
+                await self.import_from_excel(str(root_excel))
+            else:
+                logger.warning("未找到商品库 Excel 文件，知识库为空")
+        
+        self.initialized = True
     
-    def _index_exists(self) -> bool:
-        """检查索引文件是否存在"""
-        return self.index_path.exists() and self.metadata_path.exists()
-    
-    async def _build_index(self):
-        """构建向量索引"""
+    async def import_from_excel(
+        self,
+        excel_path: str,
+        save_cache: bool = True
+    ) -> Dict[str, Any]:
+        """
+        从 Excel 导入商品数据
+        
+        Args:
+            excel_path: Excel 文件路径
+            save_cache: 是否保存缓存
+            
+        Returns:
+            导入统计信息
+        """
+        logger.info(f"开始从 Excel 导入: {excel_path}")
+        start_time = datetime.now()
+        
         try:
-            # 获取所有实体
-            entities = MockKnowledgeBase.get_all_entities()
-            logger.info(f"准备构建索引，共 {len(entities)} 条数据")
+            df = pd.read_excel(excel_path)
             
-            # 批量获取嵌入向量
-            embeddings = await llm_service.batch_get_embeddings(
-                entities,
-                text_type="document"
-            )
+            # 清空现有索引
+            self.product_index = FastProductIndex()
             
-            # 转换为 numpy 数组
-            vectors = np.array(embeddings, dtype='float32')
+            # 统计
+            total = 0
+            skipped = 0
             
-            # 创建 FAISS 索引
-            self.index = faiss.IndexFlatL2(self.dimension)
-            self.index.add(vectors)
+            for _, row in df.iterrows():
+                # 跳过没有商品名称的行
+                name = row.get('商品名称')
+                if pd.isna(name) or not str(name).strip():
+                    skipped += 1
+                    continue
+                
+                # 构建商品对象
+                product = Product(
+                    id=int(row.get('商品ID', 0)),
+                    code=str(row.get('商品编号', '')),
+                    name=str(name).strip(),
+                    category=str(row.get('一级分类', '')) if pd.notna(row.get('一级分类')) else "未分类",
+                    category2=str(row.get('二级分类', '')) if pd.notna(row.get('二级分类')) else "",
+                    category3=str(row.get('三级分类', '')) if pd.notna(row.get('三级分类')) else "",
+                    unit=str(row.get('单位', '个')) if pd.notna(row.get('单位')) else "个",
+                    price=float(row.get('单价', 0)) if pd.notna(row.get('单价')) else 0.0,
+                    spec=str(row.get('商品规格', '')) if pd.notna(row.get('商品规格')) else "",
+                    brand=str(row.get('品牌', '')) if pd.notna(row.get('品牌')) else "",
+                    manufacturer=str(row.get('生产厂家', '')) if pd.notna(row.get('生产厂家')) else "",
+                    status=str(row.get('上下架', '上架')) if pd.notna(row.get('上下架')) else "上架",
+                )
+                
+                # 添加到索引
+                self.product_index.add_product(product)
+                total += 1
             
-            # 构建元数据
-            self.metadata = [
-                {
-                    "text": entity,
-                    "category": self._classify_entity(entity),
-                    "id": idx
-                }
-                for idx, entity in enumerate(entities)
-            ]
+            elapsed = (datetime.now() - start_time).total_seconds()
             
-            # 保存索引
-            self._save_index()
+            # 保存缓存
+            if save_cache:
+                self._save_index()
             
-            logger.info(f"向量索引构建完成，共 {self.index.ntotal} 条记录")
+            # 更新全局实例
+            global product_index
+            product_index = self.product_index
+            
+            stats = {
+                "total_imported": total,
+                "skipped": skipped,
+                "categories": self.product_index.get_categories(),
+                "elapsed_seconds": round(elapsed, 2),
+            }
+            
+            logger.info(f"✅ 导入完成: {total} 条商品, 跳过 {skipped} 条, 耗时 {elapsed:.2f}s")
+            return stats
             
         except Exception as e:
-            logger.error(f"构建向量索引失败: {str(e)}")
+            logger.error(f"❌ Excel 导入失败: {str(e)}")
             raise
     
-    def _classify_entity(self, entity: str) -> str:
-        """分类实体"""
-        if entity in MockKnowledgeBase.PRODUCTS:
-            return "product"
-        elif entity in MockKnowledgeBase.CUSTOMERS:
-            return "customer"
-        elif entity in MockKnowledgeBase.UNITS:
-            return "unit"
-        elif entity in MockKnowledgeBase.SUPPLIERS:
-            return "supplier"
-        else:
-            return "unknown"
+    async def import_from_bytes(
+        self,
+        file_bytes: bytes,
+        file_name: str = "upload.xlsx"
+    ) -> Dict[str, Any]:
+        """
+        从上传的文件字节导入
+        """
+        # 保存到临时文件
+        temp_path = self.data_dir / f"temp_{file_name}"
+        with open(temp_path, 'wb') as f:
+            f.write(file_bytes)
+        
+        try:
+            result = await self.import_from_excel(str(temp_path))
+            # 复制为正式文件
+            import shutil
+            shutil.copy(temp_path, self.excel_path)
+            return result
+        finally:
+            # 清理临时文件
+            if temp_path.exists():
+                temp_path.unlink()
     
     def _save_index(self):
-        """保存索引到文件"""
+        """保存索引到缓存文件"""
         try:
-            # 保存 FAISS 索引
-            faiss.write_index(self.index, str(self.index_path))
-            
-            # 保存元数据
-            with open(self.metadata_path, 'wb') as f:
-                pickle.dump(self.metadata, f)
-            
-            logger.info("向量索引已保存到文件")
-            
+            with open(self.index_path, 'wb') as f:
+                pickle.dump(self.product_index, f)
+            logger.info(f"索引已保存到 {self.index_path}")
         except Exception as e:
             logger.error(f"保存索引失败: {str(e)}")
-            raise
     
     def _load_index(self):
-        """从文件加载索引"""
-        try:
-            # 加载 FAISS 索引
-            self.index = faiss.read_index(str(self.index_path))
-            
-            # 加载元数据
-            with open(self.metadata_path, 'rb') as f:
-                self.metadata = pickle.load(f)
-            
-            logger.info(f"向量索引加载完成，共 {self.index.ntotal} 条记录")
-            
-        except Exception as e:
-            logger.error(f"加载索引失败: {str(e)}")
-            raise
+        """从缓存加载索引"""
+        with open(self.index_path, 'rb') as f:
+            self.product_index = pickle.load(f)
+        
+        # 更新全局实例
+        global product_index
+        product_index = self.product_index
+    
+    # ========== 检索接口 ==========
     
     async def search(
         self,
         query: str,
         top_k: int = 5,
-        category: Optional[str] = None
+        category: str = None
     ) -> List[Dict]:
         """
-        向量检索
+        商品检索
         
         Args:
             query: 查询文本
-            top_k: 返回前K个结果
-            category: 类别筛选
+            top_k: 返回数量
+            category: 分类过滤
             
         Returns:
-            List[Dict]: 检索结果列表
+            商品列表
         """
-        try:
-            if self.index is None:
-                raise Exception("向量索引未初始化")
-            
-            # 获取查询向量
-            query_embedding = await llm_service.get_embedding(query, text_type="query")
-            query_vector = np.array([query_embedding], dtype='float32')
-            
-            # 向量检索
-            distances, indices = self.index.search(query_vector, top_k * 2)  # 多检索一些，后续筛选
-            
-            # 构建结果
-            results = []
-            for dist, idx in zip(distances[0], indices[0]):
-                if idx >= len(self.metadata):
-                    continue
-                
-                meta = self.metadata[idx]
-                
-                # 类别筛选
-                if category and meta['category'] != category:
-                    continue
-                
-                # 计算文本相似度（二次排序）
-                text_similarity = calculate_text_similarity(query, meta['text'])
-                
-                # 计算综合分数（向量距离越小越好，文本相似度越大越好）
-                # 归一化距离分数
-                vector_score = 1.0 / (1.0 + dist)
-                combined_score = 0.6 * vector_score + 0.4 * text_similarity
-                
-                results.append({
-                    "text": meta['text'],
-                    "category": meta['category'],
-                    "vector_distance": float(dist),
-                    "text_similarity": float(text_similarity),
-                    "combined_score": float(combined_score)
-                })
-                
-                if len(results) >= top_k:
-                    break
-            
-            # 按综合分数排序
-            results.sort(key=lambda x: x['combined_score'], reverse=True)
-            
-            logger.debug(f"检索完成，查询: {query}, 返回 {len(results)} 条结果")
-            return results
-            
-        except Exception as e:
-            logger.error(f"向量检索失败: {str(e)}")
-            raise
+        results = self.product_index.search(query, limit=top_k, category=category)
+        
+        return [
+            {
+                "id": r.product.id,
+                "name": r.product.name,
+                "code": r.product.code,
+                "category": r.product.category,
+                "unit": r.product.unit,
+                "price": r.product.price,
+                "spec": r.product.spec,
+                "score": r.score,
+                "match_type": r.match_type,
+            }
+            for r in results
+        ]
     
     async def calibrate_text(
         self,
         raw_text: str,
-        category: Optional[str] = None
+        category: str = None
     ) -> Tuple[str, float, bool, Optional[List[str]]]:
         """
-        校准文本 - 核心功能（向量检索 + Turbo 二次确认）
+        校准文本（兼容旧接口）
         
         Args:
-            raw_text: OCR/ASR识别的原始文本
-            category: 类别提示
+            raw_text: 原始文本
+            category: 分类提示
             
         Returns:
-            Tuple[标准文本, 置信度, 是否歧义, 候选列表]
+            (校准后文本, 置信度, 是否歧义, 候选列表)
         """
-        try:
-            # Step 1: 向量检索找候选项
-            results = await self.search(raw_text, top_k=5, category=category)
-            
-            if not results:
-                # 没有找到匹配项，返回原文
-                logger.info(f"[校准] 未找到匹配: {raw_text}")
-                return raw_text, 0.0, False, None
-            
-            # 获取最佳匹配
-            best_match = results[0]
-            best_score = best_match['combined_score']
-            
-            # Step 2: 检查是否需要二次确认
-            need_llm_confirm = False
-            candidates = None
-            
-            if len(results) >= 2:
-                second_match = results[1]
-                score_diff = best_score - second_match['combined_score']
-                
-                # 如果 Top2 的分数差异很小，需要 LLM 二次确认
-                if score_diff < settings.AMBIGUITY_THRESHOLD:
-                    need_llm_confirm = True
-                    candidates = [r['text'] for r in results[:3]]
-                    logger.info(f"[校准] 需要 LLM 二次确认: {raw_text} -> 候选: {candidates}")
-            
-            # 如果置信度不够高，也需要二次确认
-            if best_score < 0.85:
-                need_llm_confirm = True
-                if not candidates:
-                    candidates = [r['text'] for r in results[:3]]
-            
-            # Step 3: Turbo 模型二次确认（核心流程）
-            if need_llm_confirm and candidates:
-                llm_result = await self._llm_calibrate(raw_text, candidates, category)
-                
-                if llm_result:
-                    final_text, llm_confidence, is_ambiguous = llm_result
-                    # LLM 确认后的置信度 = 向量分数 * LLM置信度
-                    final_confidence = min(best_score * llm_confidence, 1.0)
-                    
-                    logger.info(f"[校准] LLM 确认: {raw_text} -> {final_text} (置信度: {final_confidence:.2f})")
-                    return final_text, final_confidence, is_ambiguous, candidates if is_ambiguous else None
-            
-            # 向量检索置信度足够高，直接返回
-            confidence = min(best_score, 1.0)
-            logger.info(f"[校准] 向量匹配: {raw_text} -> {best_match['text']} (置信度: {confidence:.2f})")
-            
-            return best_match['text'], confidence, False, None
-            
-        except Exception as e:
-            logger.error(f"文本校准失败: {str(e)}")
-            # 失败时返回原文
-            return raw_text, 0.5, False, None
+        result = self.product_index.calibrate(raw_text, category)
+        
+        return (
+            result.calibrated,
+            result.confidence,
+            result.is_ambiguous,
+            result.candidates if result.candidates else None
+        )
     
-    async def _llm_calibrate(
+    async def calibrate(
         self,
         raw_text: str,
-        candidates: List[str],
-        category: Optional[str] = None
-    ) -> Optional[Tuple[str, float, bool]]:
+        category: str = None
+    ) -> CalibrationResult:
         """
-        使用 Turbo 模型进行二次校对确认
-        
-        Args:
-            raw_text: 原始识别文本
-            candidates: 候选项列表
-            category: 类别提示
-            
-        Returns:
-            Tuple[最终文本, 置信度, 是否仍有歧义] 或 None
+        校准商品名称（新接口）
         """
-        try:
-            category_hint = f"（类别：{category}）" if category else ""
-            candidates_str = "\n".join([f"{i+1}. {c}" for i, c in enumerate(candidates)])
-            
-            prompt = f"""你是一个商品名称校对助手。请根据 OCR/语音识别的原始文本，从候选列表中选择最匹配的标准名称。
-
-原始文本："{raw_text}"{category_hint}
-
-候选列表：
-{candidates_str}
-
-请分析并返回 JSON 格式：
-{{"choice": 选择的序号(1-{len(candidates)}), "confidence": 置信度(0-1), "reason": "简短理由"}}
-
-如果所有候选都不匹配，返回：{{"choice": 0, "confidence": 0, "reason": "无匹配"}}
-
-只返回 JSON，不要其他内容。"""
-
-            response = await llm_service.call_calibration_model(prompt)
-            
-            # 解析 LLM 返回
-            import json
-            import re
-            
-            # 提取 JSON
-            json_match = re.search(r'\{[^}]+\}', response)
-            if json_match:
-                result = json.loads(json_match.group())
-                choice = result.get('choice', 0)
-                confidence = result.get('confidence', 0.5)
-                
-                if choice > 0 and choice <= len(candidates):
-                    final_text = candidates[choice - 1]
-                    # 置信度低于 0.7 认为仍有歧义
-                    is_ambiguous = confidence < 0.7
-                    
-                    logger.info(f"[LLM校对] {raw_text} -> {final_text} (置信度: {confidence}, 理由: {result.get('reason', '')})")
-                    return final_text, confidence, is_ambiguous
-                else:
-                    # LLM 认为都不匹配
-                    logger.info(f"[LLM校对] {raw_text} -> 无匹配，保留原文")
-                    return raw_text, 0.3, True
-            
-            logger.warning(f"[LLM校对] 解析失败: {response}")
-            return None
-            
-        except Exception as e:
-            logger.error(f"LLM 校对失败: {str(e)}")
-            return None
+        return self.product_index.calibrate(raw_text, category)
+    
+    async def batch_calibrate(
+        self,
+        texts: List[str],
+        category: str = None
+    ) -> List[CalibrationResult]:
+        """批量校准"""
+        return self.product_index.batch_calibrate(texts, category)
+    
+    # ========== 分类管理 ==========
+    
+    def get_categories(self) -> List[str]:
+        """获取所有分类"""
+        return self.product_index.get_categories()
+    
+    def get_products_by_category(
+        self,
+        category: str,
+        limit: int = 100
+    ) -> List[Dict]:
+        """获取分类下的商品"""
+        products = self.product_index.get_by_category(category, limit)
+        return [p.to_dict() for p in products]
+    
+    # ========== 商品管理 ==========
+    
+    def get_product(self, product_id: int) -> Optional[Dict]:
+        """获取单个商品"""
+        product = self.product_index.get_by_id(product_id)
+        return product.to_dict() if product else None
+    
+    def get_product_by_name(self, name: str) -> Optional[Dict]:
+        """通过名称获取商品"""
+        product = self.product_index.get_by_name(name)
+        return product.to_dict() if product else None
+    
+    # ========== 统计 ==========
+    
+    def stats(self) -> Dict:
+        """获取统计信息"""
+        return self.product_index.stats()
 
 
-# 全局单例
-vector_store = VectorStoreService()
+# ========== 全局实例 ==========
 
+vector_store = KnowledgeBaseService()
+
+
+# ========== 兼容旧代码 ==========
+
+class VectorStoreService:
+    """兼容旧代码的包装类"""
+    
+    def __init__(self):
+        self._kb = vector_store
+    
+    async def initialize(self, force_rebuild: bool = False):
+        await self._kb.initialize(force_rebuild)
+    
+    async def search(self, query: str, top_k: int = 5, category: str = None) -> List[Dict]:
+        results = await self._kb.search(query, top_k, category)
+        # 转换为旧格式
+        return [
+            {
+                "text": r["name"],
+                "category": r["category"],
+                "combined_score": r["score"],
+                "vector_distance": 0,
+                "text_similarity": r["score"],
+            }
+            for r in results
+        ]
+    
+    async def calibrate_text(
+        self,
+        raw_text: str,
+        category: str = None
+    ) -> Tuple[str, float, bool, Optional[List[str]]]:
+        return await self._kb.calibrate_text(raw_text, category)

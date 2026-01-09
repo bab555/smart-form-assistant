@@ -7,10 +7,33 @@ WebSocket 连接管理器 (极简版)
 - 前端是 SoT：后端不缓存消息，断连即丢
 """
 from fastapi import WebSocket
-from typing import Dict, Optional
+from typing import Dict, Any
 from app.core.logger import app_logger as logger
 from app.core.protocol import EventType, create_message
 import json
+import math
+
+
+def clean_nan_values(obj: Any) -> Any:
+    """
+    递归清理数据中的 NaN/Infinity 值，替换为 None
+    JSON 标准不支持 NaN/Infinity
+    """
+    if isinstance(obj, dict):
+        return {k: clean_nan_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nan_values(item) for item in obj]
+    elif isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    return obj
+
+
+def safe_json_dumps(obj: Any) -> str:
+    """安全的 JSON 序列化，处理 NaN 值"""
+    cleaned = clean_nan_values(obj)
+    return json.dumps(cleaned, ensure_ascii=False)
 
 
 class ConnectionManager:
@@ -61,7 +84,9 @@ class ConnectionManager:
         try:
             websocket = self.connections[client_id]
             message = create_message(event_type, client_id, data)
-            await websocket.send_json(message)
+            # 使用安全序列化，处理 NaN 值
+            json_str = safe_json_dumps(message)
+            await websocket.send_text(json_str)
             return True
         except Exception as e:
             logger.error(f"[WS] Send failed to {client_id}: {str(e)}")
@@ -76,7 +101,9 @@ class ConnectionManager:
         
         try:
             websocket = self.connections[client_id]
-            await websocket.send_json(message)
+            # 使用安全序列化，处理 NaN 值
+            json_str = safe_json_dumps(message)
+            await websocket.send_text(json_str)
             return True
         except Exception as e:
             logger.error(f"[WS] Send raw failed to {client_id}: {str(e)}")

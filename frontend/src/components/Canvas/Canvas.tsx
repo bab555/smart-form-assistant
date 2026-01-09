@@ -1,21 +1,18 @@
 /**
- * Canvas 画布容器
+ * Canvas 画布容器 (Sheet 模式)
  * 
  * 功能：
- * - 显示多个可拖拽的表格卡片
- * - 右上角连接状态灯
- * - 新建表格按钮
- * - 从模板新建
+ * - 顶部状态栏 (时间, 连接状态)
+ * - 表格 Tab 页签 (Sheet1, Sheet2...)
+ * - 仅渲染当前激活的表格 (Active Sheet)
  */
 
 import React, { useEffect, useState, useCallback } from 'react';
-import { DndContext, DragEndEvent } from '@dnd-kit/core';
 import { useCanvasStore } from '@/store/useCanvasStore';
 import { TableCard } from './TableCard';
 import { ContextMenu, createCanvasMenuItems } from './ContextMenu';
-import { TemplateSelector } from '@/components/FloatingPanel/TemplateSelector';
-import { exportAllTablesToExcel } from '@/utils/export';
-import { Plus, Clock, Download } from 'lucide-react';
+import { exportAllTablesToExcel, exportTableToExcel } from '@/utils/export';
+import { Plus, Clock, Download, X, AlertCircle } from 'lucide-react';
 import './Canvas.css';
 
 interface ContextMenuState {
@@ -27,15 +24,19 @@ interface ContextMenuState {
 export const Canvas: React.FC = () => {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({ isOpen: false, x: 0, y: 0 });
-  const [showTemplates, setShowTemplates] = useState(false);
+  const [closingTableId, setClosingTableId] = useState<string | null>(null);
   
-  // 使用独立的 selector 订阅，避免整个 store 变化触发重渲染
+  // Store Selectors
   const tables = useCanvasStore(state => state.tables);
+  const activeTableId = useCanvasStore(state => state.activeTableId);
   const isConnected = useCanvasStore(state => state.isConnected);
   
-  // Actions 是稳定的，可以一起获取
+  // Store Actions
   const createTable = useCanvasStore(state => state.createTable);
-  const updateTablePosition = useCanvasStore(state => state.updateTablePosition);
+  const setActiveTable = useCanvasStore(state => state.setActiveTable);
+  const removeTable = useCanvasStore(state => state.removeTable);
+
+  const activeTable = activeTableId ? tables[activeTableId] : null;
 
   // 实时时钟
   useEffect(() => {
@@ -45,31 +46,52 @@ export const Canvas: React.FC = () => {
     return () => clearInterval(timer);
   }, []);
 
-  // 处理拖拽结束
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active, delta } = event;
-    const tableId = active.id as string;
-    const table = tables[tableId];
-    
-    if (table && delta) {
-      updateTablePosition(tableId, {
-        x: table.position.x + delta.x,
-        y: table.position.y + delta.y,
-      });
-    }
-  };
-
   // 新建表格
   const handleCreateTable = useCallback(() => {
     const tableCount = Object.keys(tables).length;
-    createTable({
-      title: `表格 ${tableCount + 1}`,
-      position: {
-        x: 100 + tableCount * 50,
-        y: 100 + tableCount * 50,
-      },
+    const newId = createTable({
+      title: `Sheet${tableCount + 1}`,
     });
-  }, [tables, createTable]);
+    // 自动切换到新表
+    setActiveTable(newId);
+  }, [tables, createTable, setActiveTable]);
+
+  // 点击关闭按钮
+  const handleCloseRequest = useCallback((e: React.MouseEvent, tableId: string) => {
+    e.stopPropagation();
+    setClosingTableId(tableId);
+  }, []);
+
+  // 确认关闭
+  const confirmClose = (withDownload: boolean) => {
+    if (!closingTableId) return;
+    
+    if (withDownload) {
+      const table = tables[closingTableId];
+      if (table) {
+        exportTableToExcel(table);
+      }
+    }
+    
+    removeTable(closingTableId);
+    
+    // 如果关闭的是当前激活表，切换到前一个表
+    if (activeTableId === closingTableId) {
+      const tableIds = Object.keys(tables);
+      const index = tableIds.indexOf(closingTableId);
+      if (index > 0) {
+        setActiveTable(tableIds[index - 1]);
+      } else if (tableIds.length > 1) {
+        // 如果还有其他表，切换到原本的第二个（现在的第一个）
+        const nextId = tableIds.find(id => id !== closingTableId);
+        setActiveTable(nextId || null);
+      } else {
+        setActiveTable(null);
+      }
+    }
+    
+    setClosingTableId(null);
+  };
 
   // 右键菜单
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -90,27 +112,39 @@ export const Canvas: React.FC = () => {
     exportAllTablesToExcel(tables);
   }, [tables]);
 
-  // 从模板新建
-  const handleCreateFromTemplate = useCallback(() => {
-    setShowTemplates(true);
-  }, []);
-
+  // 画布右键菜单项（仅导出所有）
   const canvasMenuItems = createCanvasMenuItems(
-    handleCreateTable,
     handleExportAll,
-    handleCreateFromTemplate,
-    false
+    Object.keys(tables).length > 0
   );
 
   return (
     <div className="canvas-container" onContextMenu={handleContextMenu}>
-      {/* 模板选择器弹窗 */}
-      {showTemplates && (
+      {/* 关闭确认弹窗 */}
+      {closingTableId && (
         <div className="template-modal-overlay">
-          <div className="template-modal-backdrop" onClick={() => setShowTemplates(false)} />
-          <TemplateSelector onClose={() => setShowTemplates(false)} />
+          <div className="template-modal-backdrop" onClick={() => setClosingTableId(null)} />
+          <div className="confirm-modal">
+            <div className="confirm-header">
+              <AlertCircle size={20} className="text-blue-500" />
+              <span>关闭表格确认</span>
+            </div>
+            <div className="confirm-body">
+              <p>您确定要关闭表格 "{tables[closingTableId]?.title}" 吗？</p>
+              <p className="text-sm text-gray-500 mt-2">未保存的内容将会丢失。</p>
+            </div>
+            <div className="confirm-footer">
+              <button className="btn-cancel" onClick={() => setClosingTableId(null)}>取消</button>
+              <button className="btn-download" onClick={() => confirmClose(true)}>
+                <Download size={14} />
+                下载并关闭
+              </button>
+              <button className="btn-danger" onClick={() => confirmClose(false)}>直接关闭</button>
+            </div>
+          </div>
         </div>
       )}
+      
       {/* 右键菜单 */}
       {contextMenu.isOpen && (
         <ContextMenu
@@ -121,58 +155,81 @@ export const Canvas: React.FC = () => {
         />
       )}
 
-      {/* 右上角状态栏 */}
-      <div className="canvas-status-bar">
-        {/* 导出所有表格按钮 */}
-        {Object.keys(tables).length > 0 && (
-          <button
-            className="export-all-btn"
-            onClick={handleExportAll}
-            title="导出所有表格"
-          >
-            <Download size={14} />
-            <span>导出全部</span>
-          </button>
-        )}
-        <div className="status-clock">
-          <Clock size={14} />
-          <span>{currentTime.toLocaleTimeString('zh-CN', { hour12: false })}</span>
+      {/* 顶部 Header: 标题/状态/操作 */}
+      <div className="canvas-header">
+        <div className="header-left">
+          <div className="header-title">订单录入系统</div>
+          <div className="status-clock" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#64748b' }}>
+            <Clock size={14} />
+            <span>{currentTime.toLocaleTimeString('zh-CN', { hour12: false })}</span>
+          </div>
+          <div style={{ 
+            display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, 
+            color: isConnected ? '#22c55e' : '#ef4444',
+            background: isConnected ? '#f0fdf4' : '#fef2f2',
+            padding: '2px 8px', borderRadius: 12, border: `1px solid ${isConnected ? '#bbf7d0' : '#fecaca'}`
+          }}>
+            <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'currentColor' }} />
+            <span>{isConnected ? '在线' : '离线'}</span>
+          </div>
         </div>
-        <div className={`connection-indicator ${isConnected ? 'connected' : 'disconnected'}`}>
-          <span className="indicator-dot" />
-          <span className="indicator-text">{isConnected ? '在线' : '离线'}</span>
+        
+        <div className="header-right">
+          {Object.keys(tables).length > 0 && (
+            <button
+              className="action-btn"
+              onClick={handleExportAll}
+              title="导出所有表格"
+            >
+              <Download size={14} />
+              <span>导出全部</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Sheet Tabs 页签 */}
+      <div className="sheet-tabs">
+        {Object.values(tables).map((table) => (
+          <div
+            key={table.id}
+            className={`sheet-tab ${activeTableId === table.id ? 'active' : ''}`}
+            onClick={() => setActiveTable(table.id)}
+          >
+            <span>{table.title}</span>
+            <div 
+              className="sheet-tab-close" 
+              onClick={(e) => handleCloseRequest(e, table.id)}
+            >
+              <X size={12} />
+            </div>
+          </div>
+        ))}
+        <div className="new-sheet-btn" onClick={handleCreateTable} title="新建 Sheet">
+          <Plus size={16} />
         </div>
       </div>
 
       {/* 画布主区域 */}
-      <DndContext onDragEnd={handleDragEnd}>
-        <div className="canvas-area">
-          {Object.values(tables).map((table) => (
-            <TableCard key={table.id} table={table} />
-          ))}
-
-          {/* 空状态 / 新建按钮 */}
-          {Object.keys(tables).length === 0 ? (
-            <div className="canvas-empty">
-              <button className="create-table-btn large" onClick={handleCreateTable}>
-                <Plus size={32} />
-                <span>新建表格</span>
-              </button>
+      <div className="canvas-content">
+        {activeTable ? (
+          <TableCard 
+            key={activeTable.id} 
+            table={activeTable}
+            onCloseRequest={(tableId) => setClosingTableId(tableId)}
+          />
+        ) : (
+          /* 空状态 */
+          <div className="canvas-empty">
+            <div className="create-btn-large" onClick={handleCreateTable}>
+              <Plus size={48} strokeWidth={1.5} color="#cbd5e1" />
+              <span style={{ fontSize: 16, fontWeight: 500, color: '#64748b' }}>新建订单 Sheet</span>
             </div>
-          ) : (
-            <button
-              className="create-table-btn floating"
-              onClick={handleCreateTable}
-              title="新建表格"
-            >
-              <Plus size={20} />
-            </button>
-          )}
-        </div>
-      </DndContext>
+          </div>
+        )}
+      </div>
     </div>
   );
 };
 
 export default Canvas;
-

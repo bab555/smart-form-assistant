@@ -39,6 +39,12 @@ class EventType(str, Enum):
     # 对话
     CHAT_MESSAGE = "chat_message"          # 对话消息
     
+    # 工具调用
+    TOOL_CALL = "tool_call"                # Agent 工具调用（前端执行）
+    
+    # 表格元数据
+    TABLE_METADATA = "table_metadata"      # 更新表格元数据
+    
     # 异常
     ERROR = "error"                        # 错误
 

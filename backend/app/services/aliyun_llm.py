@@ -93,6 +93,109 @@ class AliyunLLMService:
             logger.error(f"校对模型调用异常: {str(e)}")
             raise
     
+    async def call_turbo_model(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.3,
+        max_tokens: int = 2000
+    ) -> str:
+        """
+        调用 Turbo 模型（Qwen-Turbo）- 支持 messages 格式
+        
+        用于快速推理任务，如数据提取、结构化等
+        
+        Args:
+            messages: 对话消息列表
+            temperature: 温度参数
+            max_tokens: 最大 token 数
+            
+        Returns:
+            str: 模型回复
+        """
+        try:
+            response = dashscope.Generation.call(
+                model=settings.ALIYUN_LLM_MODEL_CALIBRATION,  # 使用 Turbo 模型
+                messages=messages,
+                result_format='message',
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=False
+            )
+            
+            if response.status_code == 200:
+                content = response.output.choices[0].message.content
+                logger.debug(f"Turbo 模型返回: {content[:100]}...")
+                return content
+            else:
+                logger.error(f"Turbo 模型调用失败: {response.code}")
+                raise Exception(f"Turbo 模型调用失败: {response.message}")
+                
+        except Exception as e:
+            logger.error(f"Turbo 模型调用异常: {str(e)}")
+            raise
+    
+    async def call_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        temperature: float = 0.7,
+        max_tokens: int = 2000
+    ) -> Dict[str, Any]:
+        """
+        调用主控模型（带 Function Calling）
+        
+        Args:
+            messages: 对话消息列表
+            tools: 工具定义列表
+            temperature: 温度参数
+            max_tokens: 最大 token 数
+            
+        Returns:
+            Dict: {
+                "content": str,  # 文本回复（可能为空）
+                "tool_calls": List[Dict] or None  # 工具调用列表
+            }
+        """
+        try:
+            response = dashscope.Generation.call(
+                model=settings.ALIYUN_LLM_MODEL_MAIN,
+                messages=messages,
+                tools=tools,
+                result_format='message',
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=False
+            )
+            
+            if response.status_code == 200:
+                choice = response.output.choices[0]
+                message = choice.message
+                
+                result = {
+                    "content": message.content or "",
+                    "tool_calls": None
+                }
+                
+                # 检查是否有工具调用
+                if hasattr(message, 'tool_calls') and message.tool_calls:
+                    result["tool_calls"] = [
+                        {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                        for tc in message.tool_calls
+                    ]
+                    logger.info(f"主控模型调用工具: {[tc['name'] for tc in result['tool_calls']]}")
+                
+                return result
+            else:
+                logger.error(f"主控模型(tools)调用失败: {response.code} - {response.message}")
+                raise Exception(f"LLM调用失败: {response.message}")
+                
+        except Exception as e:
+            logger.error(f"主控模型(tools)调用异常: {str(e)}")
+            raise
+    
     async def call_vl_model(
         self,
         image_url: Optional[str] = None,

@@ -1,153 +1,222 @@
 """
-Skills 注册表系统
-将数据库表转换为可匹配的 Skills，用于主控模型判断内容相关性
+Skills 注册表系统 (重构版)
+
+功能：
+1. 动态创建/删除 Skills
+2. 持久化存储（JSON 文件）
+3. 提供表格模板
 """
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+import json
+import os
+from pathlib import Path
 from app.core.logger import app_logger as logger
 
 
 @dataclass
 class Skill:
-    """技能定义"""
-    skill_id: str                           # 技能唯一标识
-    name: str                               # 技能名称
-    description: str                        # 技能描述
-    keywords: List[str]                     # 关键词列表（用于匹配）
-    category: str                           # 分类（product/customer/unit/warehouse等）
-    table_source: str                       # 来源数据库表名
-    sample_values: List[str] = field(default_factory=list)  # 示例值
+    """技能/模板定义"""
+    id: str                                     # 唯一标识
+    name: str                                   # 名称
+    category: str                               # 分类 (product/customer/general)
+    schema: List[Dict[str, Any]]                # 表头定义 [{key, title, type}]
+    description: str = ""                       # 描述
+    keywords: List[str] = field(default_factory=list)  # 关键词
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'Skill':
+        return Skill(**data)
 
 
 class SkillRegistry:
     """
     Skills 注册表
-    管理所有可用的校准技能，并提供匹配接口
+    支持动态增删和持久化
     """
     
-    def __init__(self):
+    def __init__(self, storage_path: str = None):
         self.skills: Dict[str, Skill] = {}
+        self._storage_path = storage_path or self._default_storage_path()
         self._initialized = False
     
+    def _default_storage_path(self) -> str:
+        """默认存储路径"""
+        base_dir = Path(__file__).parent.parent.parent / "data"
+        base_dir.mkdir(exist_ok=True)
+        return str(base_dir / "skills.json")
+    
     def initialize(self):
-        """初始化 Skills 注册表"""
+        """初始化：加载持久化数据 + 注册默认 Skills"""
         if self._initialized:
             return
         
-        # 从 Mock 数据生成 Skills
-        self._register_mock_skills()
+        # 尝试加载持久化数据
+        self._load_from_file()
+        
+        # 如果没有数据，注册默认 Skills
+        if not self.skills:
+            self._register_default_skills()
+        
         self._initialized = True
-        logger.info(f"Skills 注册表初始化完成，共 {len(self.skills)} 个技能")
+        logger.info(f"SkillRegistry 初始化完成，共 {len(self.skills)} 个技能")
     
-    def _register_mock_skills(self):
-        """注册 Mock Skills（实际项目中应从数据库动态生成）"""
-        
-        # Skill 1: 农产品校准
-        self.register_skill(Skill(
-            skill_id="agricultural_products",
-            name="农产品校准",
-            description="校准水果、蔬菜、农产品名称，修正错别字和规范名称",
-            keywords=["水果", "蔬菜", "农产品", "苹果", "香蕉", "橙子", "葡萄", "西瓜", 
-                      "白菜", "萝卜", "土豆", "番茄", "黄瓜", "生鲜", "果蔬"],
+    def _register_default_skills(self):
+        """注册默认 Skills"""
+        # 农产品订单模板
+        self.create_skill(
+            name="农产品订单",
             category="product",
-            table_source="products",
-            sample_values=["红富士苹果", "黄金香蕉", "脐橙", "巨峰葡萄", "麒麟西瓜"]
-        ))
+            schema=[
+                {"key": "product", "title": "商品名", "type": "text"},
+                {"key": "quantity", "title": "数量", "type": "number"},
+                {"key": "unit", "title": "单位", "type": "text"},
+                {"key": "price", "title": "单价", "type": "number"},
+                {"key": "total", "title": "金额", "type": "number"},
+            ],
+            description="农产品采购/销售订单",
+            keywords=["水果", "蔬菜", "农产品", "生鲜"],
+        )
         
-        # Skill 2: 客户信息校准
-        self.register_skill(Skill(
-            skill_id="customers",
-            name="客户信息校准",
-            description="校准客户姓名、公司名称，修正识别错误",
-            keywords=["客户", "买家", "收货人", "公司", "商户", "供应商", "采购商"],
+        # 通用订单模板
+        self.create_skill(
+            name="通用订单",
+            category="general",
+            schema=[
+                {"key": "item", "title": "项目", "type": "text"},
+                {"key": "quantity", "title": "数量", "type": "number"},
+                {"key": "unit", "title": "单位", "type": "text"},
+                {"key": "price", "title": "单价", "type": "number"},
+                {"key": "remark", "title": "备注", "type": "text"},
+            ],
+            description="通用订单模板",
+            keywords=["订单", "采购", "销售"],
+        )
+        
+        # 客户列表模板
+        self.create_skill(
+            name="客户列表",
             category="customer",
-            table_source="customers",
-            sample_values=["张三", "李四", "王五", "赵六", "钱七"]
-        ))
-        
-        # Skill 3: 单位校准
-        self.register_skill(Skill(
-            skill_id="units",
-            name="计量单位校准",
-            description="校准计量单位，统一单位表示",
-            keywords=["单位", "计量", "公斤", "斤", "千克", "克", "吨", "箱", "件", "个", "份"],
-            category="unit",
-            table_source="units",
-            sample_values=["公斤", "斤", "箱", "件", "个"]
-        ))
-        
-        # Skill 4: 仓库校准
-        self.register_skill(Skill(
-            skill_id="warehouses",
-            name="仓库信息校准",
-            description="校准仓库名称和位置信息",
-            keywords=["仓库", "库房", "存储", "冷库", "保鲜库", "存放"],
-            category="warehouse",
-            table_source="warehouses",
-            sample_values=["一号仓库", "冷藏库A", "生鲜仓"]
-        ))
+            schema=[
+                {"key": "name", "title": "客户名称", "type": "text"},
+                {"key": "contact", "title": "联系人", "type": "text"},
+                {"key": "phone", "title": "电话", "type": "text"},
+                {"key": "address", "title": "地址", "type": "text"},
+            ],
+            description="客户信息管理",
+            keywords=["客户", "联系人", "商户"],
+        )
     
-    def register_skill(self, skill: Skill):
-        """注册一个 Skill"""
-        self.skills[skill.skill_id] = skill
-        logger.debug(f"注册 Skill: {skill.skill_id} - {skill.name}")
+    def create_skill(
+        self,
+        name: str,
+        category: str,
+        schema: List[Dict[str, Any]],
+        description: str = "",
+        keywords: List[str] = None,
+    ) -> Skill:
+        """创建新 Skill"""
+        # 生成唯一 ID
+        skill_id = f"skill_{name.lower().replace(' ', '_')}_{len(self.skills)}"
+        
+        skill = Skill(
+            id=skill_id,
+            name=name,
+            category=category,
+            schema=schema,
+            description=description,
+            keywords=keywords or [],
+        )
+        
+        self.skills[skill_id] = skill
+        self._save_to_file()
+        
+        logger.info(f"创建 Skill: {skill_id} - {name}")
+        return skill
     
     def get_skill(self, skill_id: str) -> Optional[Skill]:
-        """获取指定 Skill"""
+        """获取 Skill"""
         return self.skills.get(skill_id)
     
-    def get_all_skills(self) -> List[Skill]:
-        """获取所有 Skills"""
-        return list(self.skills.values())
+    def list_skills(self, category: str = None) -> List[Skill]:
+        """列出 Skills"""
+        skills = list(self.skills.values())
+        if category:
+            skills = [s for s in skills if s.category == category]
+        return skills
     
-    def get_skills_summary(self) -> str:
-        """
-        生成 Skills 摘要，供主控模型参考
-        """
-        if not self.skills:
-            return "当前没有可用的校准技能。"
-        
-        summary_lines = ["可用的校准技能："]
-        for skill in self.skills.values():
-            keywords_str = "、".join(skill.keywords[:5])
-            samples_str = "、".join(skill.sample_values[:3]) if skill.sample_values else "无"
-            summary_lines.append(
-                f"- {skill.skill_id}: {skill.name}\n"
-                f"  描述: {skill.description}\n"
-                f"  关键词: {keywords_str}...\n"
-                f"  示例: {samples_str}"
-            )
-        
-        return "\n".join(summary_lines)
+    def delete_skill(self, skill_id: str) -> bool:
+        """删除 Skill"""
+        if skill_id in self.skills:
+            del self.skills[skill_id]
+            self._save_to_file()
+            logger.info(f"删除 Skill: {skill_id}")
+            return True
+        return False
     
-    def get_skill_categories(self) -> Dict[str, List[str]]:
-        """
-        获取按类别分组的 Skill IDs
-        """
-        categories: Dict[str, List[str]] = {}
-        for skill in self.skills.values():
-            if skill.category not in categories:
-                categories[skill.category] = []
-            categories[skill.category].append(skill.skill_id)
-        return categories
+    def get_schema_for_skill(self, skill_id: str) -> Optional[List[Dict[str, Any]]]:
+        """获取 Skill 的表头 Schema"""
+        skill = self.get_skill(skill_id)
+        return skill.schema if skill else None
     
     def match_skills_by_keywords(self, text: str) -> List[str]:
-        """
-        简单关键词匹配（作为 LLM 匹配的备选方案）
-        """
+        """通过关键词匹配 Skills"""
         matched = []
         text_lower = text.lower()
         
         for skill in self.skills.values():
             for keyword in skill.keywords:
                 if keyword.lower() in text_lower:
-                    if skill.skill_id not in matched:
-                        matched.append(skill.skill_id)
+                    if skill.id not in matched:
+                        matched.append(skill.id)
                     break
         
         return matched
+    
+    def get_skills_summary(self) -> str:
+        """生成 Skills 摘要（供 LLM 参考）"""
+        if not self.skills:
+            return "当前没有可用的模板。"
+        
+        lines = ["可用的表格模板："]
+        for skill in self.skills.values():
+            cols = ", ".join([c["title"] for c in skill.schema[:4]])
+            lines.append(f"- {skill.name} ({skill.category}): {cols}...")
+        
+        return "\n".join(lines)
+    
+    # ========== 持久化 ==========
+    
+    def _save_to_file(self):
+        """保存到文件"""
+        try:
+            data = {sid: s.to_dict() for sid, s in self.skills.items()}
+            with open(self._storage_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存 Skills 失败: {str(e)}")
+    
+    def _load_from_file(self):
+        """从文件加载"""
+        if not os.path.exists(self._storage_path):
+            return
+        
+        try:
+            with open(self._storage_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            for sid, sdata in data.items():
+                self.skills[sid] = Skill.from_dict(sdata)
+            
+            logger.info(f"从文件加载 {len(self.skills)} 个 Skills")
+        except Exception as e:
+            logger.error(f"加载 Skills 失败: {str(e)}")
 
 
 # 全局单例
 skill_registry = SkillRegistry()
-
