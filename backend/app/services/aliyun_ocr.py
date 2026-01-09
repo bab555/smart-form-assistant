@@ -1,5 +1,9 @@
 """
-阿里云 OCR 服务封装 - 使用 DashScope Qwen-VL 多模态能力
+阿里云 OCR 服务封装 - 使用 DashScope 多模态能力
+
+模型配置：
+- 印刷体 OCR: qwen-vl-ocr-2025-11-20（无时延，高精度）
+- 手写体识别: qwen3-vl-plus（支持提示词引导）
 """
 import base64
 from typing import Optional, Tuple, List
@@ -13,18 +17,24 @@ from app.services.handwriting_hints import HANDWRITING_HINTS_FOR_VL
 
 
 class AliyunOCRService:
-    """阿里云 OCR 服务 (基于 DashScope Qwen-VL)"""
+    """阿里云 OCR 服务 (基于 DashScope)"""
     
     def __init__(self):
         """初始化 OCR 服务"""
-        dashscope.api_key = settings.ALIYUN_ACCESS_KEY_ID
-        logger.info("OCR 服务初始化完成 (使用 DashScope Qwen-VL)")
+        # DashScope 使用 sk-...（百炼 API Key）
+        api_key = settings.DASHSCOPE_API_KEY
+        if not api_key and settings.ALIYUN_ACCESS_KEY_ID.startswith("sk-"):
+            api_key = settings.ALIYUN_ACCESS_KEY_ID
+        dashscope.api_key = api_key
+        logger.info(f"OCR 服务初始化完成")
+        logger.info(f"  - 印刷体模型: {settings.ALIYUN_OCR_MODEL}")
+        logger.info(f"  - 手写体模型: {settings.ALIYUN_VL_MODEL}")
     
     async def recognize_general(
         self,
         image_data: bytes = None,
         image_url: str = None
-    ) -> str:
+    ) -> Tuple[str, float, float]:
         """
         通用文字识别 (使用 Qwen-VL 多模态模型)
         
@@ -33,7 +43,7 @@ class AliyunOCRService:
             image_url: 图片URL（二选一）
             
         Returns:
-            str: 识别的文字内容
+            (str, float, float): (识别的文字内容, 平均置信度, 低分占比)
         """
         try:
             # 构建图片输入
@@ -46,38 +56,50 @@ class AliyunOCRService:
             else:
                 raise ValueError("必须提供 image_data 或 image_url")
             
-            # 构建多模态消息
+            # === 印刷体优先走传统 OCR OpenAPI（更快），失败回退 VL-OCR ===
+            if settings.OCR_PRINTED_USE_OPENAPI:
+                try:
+                    # 1) 优先用官方 SDK
+                    from app.services.aliyun_ocr_openapi_sdk import get_ocr_openapi_sdk
+                    sdk_client = get_ocr_openapi_sdk()
+                    result_text, avg_confidence, low_conf_ratio = sdk_client.recognize_printed(image_data=image_data, image_url=image_url)
+                    logger.info(f"OCR(OpenAPI) 成功: len={len(result_text)}, conf={avg_confidence:.1f}, low_ratio={low_conf_ratio:.2%}")
+                    return result_text, avg_confidence, low_conf_ratio
+                except Exception as e:
+                    logger.warning(f"OCR(OpenAPI SDK) 失败，尝试自签名实现: {str(e)}")
+                    try:
+                        # 2) 自签名实现兜底
+                        from app.services.aliyun_ocr_openapi import ocr_openapi
+                        result_text = await ocr_openapi.recognize_printed(image_data=image_data)
+                        logger.info(f"OCR(OpenAPI 自签名) 识别成功，提取文本长度: {len(result_text)}")
+                        return result_text, 85.0, 0.0  # 兜底默认高置信度
+                    except Exception as e2:
+                        logger.warning(f"OCR(OpenAPI 自签名) 失败，回退 VL-OCR: {str(e2)}")
+
+            # 回退：使用专用印刷体 VL-OCR 模型（qwen-vl-ocr-2025-11-20）
             messages = [
                 {
                     "role": "user",
                     "content": [
                         {"image": image_input},
-                        {"text": "请识别这张图片中的所有内容。如果包含表格或列表，请直接输出为 Markdown 表格格式。如果是键值对（如表单），也请整理为 Markdown 表格。保持原有内容的完整性。"}
+                        {"text": "请仅输出图像中的文本内容。"}
                     ]
                 }
             ]
-            
-            # 调用 Qwen-VL 模型
-            response = MultiModalConversation.call(
-                model=settings.ALIYUN_VL_MODEL,
-                messages=messages
-            )
-            
-            if response.status_code == 200:
-                # 提取识别结果
-                content = response.output.choices[0].message.content
-                if isinstance(content, list):
-                    # 可能返回列表格式
-                    text_parts = [item.get("text", "") for item in content if isinstance(item, dict)]
-                    result_text = "\n".join(text_parts)
-                else:
-                    result_text = str(content)
-                
-                logger.info(f"OCR 识别成功，提取文本长度: {len(result_text)}")
-                return result_text
+            response = MultiModalConversation.call(model=settings.ALIYUN_OCR_MODEL, messages=messages)
+            if response.status_code != 200:
+                logger.error(f"VL-OCR 识别失败: {response.code} - {response.message}")
+                raise Exception(f"VL-OCR 识别失败: {response.message}")
+
+            content = response.output.choices[0].message.content
+            if isinstance(content, list):
+                text_parts = [item.get("text", "") for item in content if isinstance(item, dict)]
+                result_text = "\n".join(text_parts)
             else:
-                logger.error(f"OCR 识别失败: {response.code} - {response.message}")
-                raise Exception(f"OCR 识别失败: {response.message}")
+                result_text = str(content)
+
+            logger.info(f"OCR(VL-OCR) 识别成功，提取文本长度: {len(result_text)}")
+            return result_text, 90.0, 0.0
                 
         except Exception as e:
             logger.error(f"OCR 识别异常: {str(e)}")

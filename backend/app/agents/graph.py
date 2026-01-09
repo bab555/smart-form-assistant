@@ -55,6 +55,7 @@ async def push_event(client_id: str, event_type: EventType, data: dict):
 
 async def push_row(client_id: str, table_id: str, row: dict, row_index: int):
     """推送单行数据"""
+    logger.debug(f"[PushRow] Sending row {row_index}: {row}")
     await push_event(client_id, EventType.ROW_COMPLETE, {
         "table_id": table_id,
         "row": row,
@@ -133,40 +134,58 @@ async def ocr_node(state: AgentState) -> AgentState:
             raise ValueError("缺少文件内容")
         
         # 1. 检测内容类型（手写/打印/混合）
+        # === 智能分流策略：默认走快速OCR（Fail-fast） ===
+        # 原理：传统OCR识别手写体时，置信度(avg_confidence)通常极低。
+        # 策略：
+        # 1. 先跑快速 OCR (OpenAPI)。
+        # 2. 如果 置信度 > 80：判定为印刷体，直接使用。
+        # 3. 如果 置信度 <= 80 或 无结果：判定为手写/疑难，回退 VL 模型。
+        
         await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
             "role": "agent",
-            "content": "🔍 正在分析图片内容类型..."
+            "content": "📄 正在进行印刷体 OCR（快路径）..."
         })
-        
-        content_type = await ocr_service.detect_content_type(image_data=file_content)
-        logger.info(f"[OCR] Content type: {content_type}")
-        
-        # 2. 根据内容类型选择识别方法
+
         ocr_notes = []
+        content_type = "printed"
+        ocr_text = ""
+        avg_confidence = 0.0
+        low_conf_ratio = 0.0
+
+        try:
+            # 返回值：(文本, 平均置信度, 低分占比)
+            ocr_text, avg_confidence, low_conf_ratio = await ocr_service.recognize_general(image_data=file_content)
+        except Exception as e:
+            logger.warning(f"[OCR] Printed OCR failed, fallback handwriting: {str(e)}")
+            ocr_text = ""
+            avg_confidence = 0.0
+            low_conf_ratio = 1.0
+
+        # === 智能判别逻辑 ===
+        # 1. 没认出东西 -> 肯定是疑难杂症/手写
+        # 2. 局部低分占比过高 (>5%) -> 说明有手写填空 (即使只有几个字也可能是关键信息)
+        # 3. 整体置信度过低 (<80) -> 说明图片整体质量差或全是潦草手写
         
-        if content_type == "handwriting":
-            # 手写体：使用带简化字提示的订单识别
+        is_poor_quality = (
+            not ocr_text or 
+            low_conf_ratio > 0.05 or 
+            avg_confidence < 80.0
+        )
+        
+        if is_poor_quality:
+            reason = []
+            if not ocr_text: reason.append("结果为空")
+            if low_conf_ratio > 0.05: reason.append(f"局部低分占比高({low_conf_ratio:.1%})")
+            if avg_confidence < 80.0: reason.append(f"整体置信度低({avg_confidence:.1f})")
+            
             await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
                 "role": "agent",
-                "content": "✍️ 检测到手写内容，正在进行智能识别..."
+                "content": f"✍️ 判定为混合/手写单据 ({', '.join(reason)})，切换 VL 模型..."
             })
+            content_type = "handwriting"
             ocr_text, ocr_notes = await ocr_service.recognize_order_handwriting(image_data=file_content)
-            
-        elif content_type == "printed":
-            # 打印体：使用通用识别
-            await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
-                "role": "agent",
-                "content": "📄 检测到打印内容，正在进行文字识别..."
-            })
-            ocr_text = await ocr_service.recognize_general(image_data=file_content)
-            
         else:
-            # 混合：使用手写订单识别（更全面）
-            await push_event(state["client_id"], EventType.CHAT_MESSAGE, {
-                "role": "agent",
-                "content": "📝 检测到混合内容，正在进行智能识别..."
-            })
-            ocr_text, ocr_notes = await ocr_service.recognize_order_handwriting(image_data=file_content)
+            logger.info(f"[OCR] High quality (conf={avg_confidence:.1f}, low_ratio={low_conf_ratio:.1%}), skipping VL.")
         
         state["ocr_text"] = ocr_text
         state["ocr_notes"] = ocr_notes  # 保存识别备注供后续校对参考
@@ -193,9 +212,10 @@ async def ocr_node(state: AgentState) -> AgentState:
 
 async def excel_node(state: AgentState) -> AgentState:
     """
-    Excel 节点 - 使用 FastTools 直接解析 Excel/CSV
+    Excel 节点 - 使用 FastTools 解析 Excel/CSV，转为文本交给 LLM 标准化
     """
     from app.agents.tools.fast_tools import fast_tools
+    import json
     
     logger.info(f"[Excel] Processing task {state['task_id']}")
     
@@ -209,12 +229,14 @@ async def excel_node(state: AgentState) -> AgentState:
         # 使用 FastTools 解析
         result = fast_tools.parse_excel(file_content, file_name)
         
-        if result.success:
-            state["extracted_rows"] = result.rows
-            logger.info(f"[Excel] Extracted {len(result.rows)} rows via FastTools")
-            state["next_node"] = "push_rows_node"
+        if result.success and result.rows:
+            # 将提取的行转换为 JSON 字符串或 Markdown，交给 LLM 进行标准化清洗
+            # 这样能自动处理序号、规格/单位拆分等逻辑
+            state["ocr_text"] = json.dumps(result.rows, ensure_ascii=False)
+            state["next_node"] = "llm_node"
+            logger.info(f"[Excel] Parsed {len(result.rows)} rows, passing to LLM for standardization")
         else:
-            state["error"] = result.message
+            state["error"] = result.message or "Excel 解析失败或为空"
             state["next_node"] = "end"
         
     except Exception as e:
@@ -227,9 +249,10 @@ async def excel_node(state: AgentState) -> AgentState:
 
 async def word_node(state: AgentState) -> AgentState:
     """
-    Word 节点 - 使用 FastTools 解析 Word 文档
+    Word 节点 - 使用 FastTools 解析 Word 文档，内容交给 LLM
     """
     from app.agents.tools.fast_tools import fast_tools
+    import json
     
     logger.info(f"[Word] Processing task {state['task_id']}")
     
@@ -242,17 +265,21 @@ async def word_node(state: AgentState) -> AgentState:
         result = fast_tools.parse_word(file_content)
         
         if result.success:
+            content_for_llm = ""
             if result.rows:
-                state["extracted_rows"] = result.rows
-                state["next_node"] = "push_rows_node"
-                logger.info(f"[Word] Extracted {len(result.rows)} rows via FastTools")
-            elif result.source_type == 'word_text':
-                # 没有表格，提取的是文本，交给 LLM
-                state["ocr_text"] = result.message
+                # 表格内容转 JSON 字符串
+                content_for_llm = json.dumps(result.rows, ensure_ascii=False)
+                logger.info(f"[Word] Extracted {len(result.rows)} rows from tables")
+            elif result.message:
+                # 纯文本内容
+                content_for_llm = result.message
+                logger.info(f"[Word] Extracted text content")
+            
+            if content_for_llm:
+                state["ocr_text"] = content_for_llm
                 state["next_node"] = "llm_node"
-                logger.info(f"[Word] No tables, extracted text for LLM")
             else:
-                state["error"] = "Word 文档为空"
+                state["error"] = "Word 文档内容为空"
                 state["next_node"] = "end"
         else:
             state["error"] = result.message
@@ -334,17 +361,27 @@ async def push_rows_node(state: AgentState) -> AgentState:
             "schema": schema,
         })
     else:
-        # 如果没有指定 table_id，让前端创建新表
+        # 生成一个真实的 table_id
+        import time
+        table_id = f"sheet_{int(time.time() * 1000)}"
+        
+        # 创建新表，发送真实的 table_id
         await push_event(client_id, EventType.TABLE_CREATE, {
+            "table_id": table_id,
             "title": f"导入数据 - {state.get('file_name', '未命名')}",
             "source": state.get("file_name"),
             "schema": schema,
         })
-        table_id = "new"  # 这是一个占位符，实际上前端可能会返回真实的 table_id，或者通过 active_table 同步
+        # 记录回 state，便于 TASK_FINISH / 后续节点使用
+        state["table_id"] = table_id
     
     # 逐行清洗并推送
     valid_rows = []
     for idx, raw_row in enumerate(raw_rows):
+        # 调试：打印原始 key 的 hex，检查是否有不可见字符
+        if idx == 0:
+            logger.debug(f"[PushRows] First row keys hex: {{k: k.encode('utf-8').hex() for k in raw_row.keys()}}")
+            
         # 无论数据来源（Excel/OCR），都映射到标准模板
         normalized_row = map_row_to_template(raw_row)
         await push_row(client_id, table_id, normalized_row, idx)
@@ -355,107 +392,165 @@ async def push_rows_node(state: AgentState) -> AgentState:
     
     await push_event(client_id, EventType.CHAT_MESSAGE, {
         "role": "agent",
-        "content": f"✅ 已提取 {len(valid_rows)} 行数据"
+        "content": f"✅ 已提取 {len(valid_rows)} 行数据（先填表，后台校对中…）"
     })
-    
-    state["next_node"] = "calibration_node"
+
+    # === 关键改动：校对改为后台异步，不阻塞“填表完成”的视觉反馈 ===
+    # 这样前端会更快收到 TASK_FINISH（并停止 isStreaming），校对结果随后逐条推送。
+    import asyncio
+
+    async def _run_calibration_background(cal_state: AgentState):
+        try:
+            # 复用现有校对节点逻辑
+            await calibration_node(cal_state)
+        except Exception as e:
+            logger.error(f"[CalibrationBg] Failed: {str(e)}")
+            await push_event(cal_state["client_id"], EventType.CHAT_MESSAGE, {
+                "role": "agent",
+                "content": f"⚠️ 校对流程异常（不影响填表）：{str(e)}"
+            })
+
+    # 仅保留校对所需字段，避免把大文件内容带入后台任务
+    cal_state: AgentState = {
+        "task_id": state["task_id"],
+        "client_id": state["client_id"],
+        "task_type": state["task_type"],
+        "file_content": None,
+        "file_name": state.get("file_name"),
+        "text_content": state.get("text_content"),
+        "ocr_text": state.get("ocr_text"),
+        "ocr_notes": state.get("ocr_notes"),
+        "content_type": state.get("content_type"),
+        "extracted_rows": valid_rows,
+        "table_id": table_id,
+        "table_context": state.get("table_context"),
+        "next_node": None,
+        "error": None,
+    }
+    asyncio.create_task(_run_calibration_background(cal_state))
+
+    # 直接结束任务（不等校对）
+    state["next_node"] = "end"
     return state
 
 
 async def calibration_node(state: AgentState) -> AgentState:
     """
-    校准节点 - 程序检索 + Turbo 模型智能校对
+    校准节点 - 分流处理打印体/手写体
     
-    三层校对流程：
-    1. 程序快速检索：从知识库找候选商品（<30ms）
-    2. Turbo 模型智能校对：结合候选列表进行字形/拼音/语义分析
-    3. 阈值判断：根据置信度分级输出建议
+    【打印体】纯程序处理（极快）：
+    - 精确匹配 → 直接填入"订单商品"
+    - 模糊匹配 → 显示多个候选
+    
+    【手写体】程序 + Turbo：
+    - 精确匹配 → 直接填入"订单商品"
+    - 模糊候选 + Turbo 推断 → 智能推断结果
     """
     from app.services.knowledge_base import vector_store
     from app.services.aliyun_llm import llm_service
-    from app.services.handwriting_hints import CalibrationThresholds
+    from app.core.templates import HANDWRITING_CALIBRATION_PROMPT
     
     logger.info(f"[Calibration] Task {state['task_id']}")
     
     rows = state.get("extracted_rows", [])
     client_id = state["client_id"]
     table_id = state.get("table_id", "new")
-    content_type = state.get("content_type", "unknown")  # 内容类型（手写/打印）
-    ocr_notes = state.get("ocr_notes", [])  # OCR 阶段的识别备注
+    content_type = state.get("content_type", "printed")  # 默认为打印体
     
     if not rows:
         state["next_node"] = "end"
         return state
     
-    # 通知前端：开始校对
+    # 判断是否为手写体
+    is_handwriting = content_type in ["handwriting", "mixed"]
+    
     await push_event(client_id, EventType.CHAT_MESSAGE, {
         "role": "agent",
-        "content": "🔍 正在进行智能校对..."
+        "content": f"🔍 正在校对... ({'手写识别模式' if is_handwriting else '打印识别模式'})"
     })
     
-    # 在标准 Schema 中，识别商品字段名
     product_field = "识别商品"
+    exact_match_count = 0
+    fuzzy_match_count = 0
+    need_llm_items = []  # 手写体需要 LLM 推断的项
     
-    calibration_count = 0
-    need_llm_review = []  # 需要 LLM 复核的项
-    
-    # === 第一轮：程序快速检索 ===
+    # === 程序快速匹配（打印体和手写体都先执行）===
     for idx, row in enumerate(rows):
-        order_product = ""  # 订单商品（校对结果）
-        note = ""  # 备注提示
-        product_name = row.get(product_field, "")
+        product_name = str(row.get(product_field, "")).strip()
+        order_product = ""
+        note = ""
         
-        if product_name:
-            try:
-                # 程序快速检索候选
-                result = await vector_store.calibrate(str(product_name))
-                confidence_level = CalibrationThresholds.get_level(result.confidence)
-                
-                if confidence_level == 'high':
-                    # 高置信度：直接填入匹配的商品名
-                    order_product = result.calibrated
-                    if result.product and result.product.price == 0:
-                        note = f"⚠️ 无价格"
-                    
-                elif confidence_level == 'medium':
-                    # 中等置信度：填入建议，标记需要复核
-                    order_product = f"✅ {result.calibrated}"
-                    need_llm_review.append({
+        if not product_name:
+            continue
+        
+        try:
+            # 尝试从知识库匹配
+            result = await vector_store.calibrate(product_name)
+            
+            # 精确匹配（置信度 > 0.95）
+            if result.confidence >= 0.95:
+                order_product = result.calibrated
+                exact_match_count += 1
+                if result.product and result.product.price == 0:
+                    note = "⚠️ 无价格"
+            
+            # 高置信度模糊匹配（0.8 - 0.95）
+            elif result.confidence >= 0.8:
+                order_product = result.calibrated
+                fuzzy_match_count += 1
+            
+            # 中等置信度（0.5 - 0.8）
+            elif result.confidence >= 0.5:
+                if is_handwriting:
+                    # 手写体：收集候选，交给 LLM 推断
+                    candidates = [result.calibrated] + (result.candidates or [])[:4]
+                    need_llm_items.append({
                         "idx": idx,
                         "original": product_name,
-                        "candidates": [result.calibrated] + (result.candidates or [])[:4],
-                        "confidence": result.confidence
+                        "candidates": candidates
                     })
-                    
-                elif confidence_level == 'low':
-                    # 低置信度：列出候选，需要 LLM 复核
-                    if result.candidates:
-                        order_product = f"❓ 可能是: {', '.join(result.candidates[:3])}"
-                        need_llm_review.append({
-                            "idx": idx,
-                            "original": product_name,
-                            "candidates": result.candidates[:5],
-                            "confidence": result.confidence
-                        })
-                    else:
-                        order_product = f"❓ 请核对"
-                        
+                    order_product = f"⏳ AI分析中..."
                 else:
-                    # 极低置信度：直接标记为未找到
-                    order_product = f"❌ 库中未找到，请手动填写"
-                    
-            except Exception as e:
-                logger.debug(f"[Calibration] KB match failed for row {idx}: {str(e)}")
-                order_product = f"❓ 校对失败"
-        
-        # 数据合理性校验
-        qty = row.get("数量")
-        if isinstance(qty, (int, float)) and qty < 0:
-            note = f"⚠️ 数量为负数: {qty}" if not note else f"{note}; 数量为负数"
+                    # 打印体：直接显示候选
+                    candidates = [result.calibrated] + (result.candidates or [])[:2]
+                    order_product = f"❓ 可能: {' / '.join(candidates)}"
+                    fuzzy_match_count += 1
             
-        # 推送"订单商品"列
+            # 低置信度（0.3 - 0.5）
+            elif result.confidence >= 0.3:
+                if is_handwriting and result.candidates:
+                    # 手写体：收集候选，交给 LLM
+                    need_llm_items.append({
+                        "idx": idx,
+                        "original": product_name,
+                        "candidates": result.candidates[:5]
+                    })
+                    order_product = f"⏳ AI分析中..."
+                elif result.candidates:
+                    # 打印体：显示多个候选
+                    order_product = f"❓ 可能: {' / '.join(result.candidates[:3])}"
+                else:
+                    order_product = "❌ 未找到匹配"
+            
+            # 极低置信度（< 0.3）
+            else:
+                if is_handwriting:
+                    # 手写体：即使没有候选也尝试让 LLM 分析
+                    need_llm_items.append({
+                        "idx": idx,
+                        "original": product_name,
+                        "candidates": result.candidates[:5] if result.candidates else []
+                    })
+                    order_product = f"⏳ AI分析中..."
+                else:
+                    order_product = "❌ 库中未找到"
+                    
+        except Exception as e:
+            logger.debug(f"[Calibration] Match failed for row {idx}: {str(e)}")
+            order_product = "❓ 匹配异常"
+        
+        # 推送校对结果
         if order_product:
-            calibration_count += 1
             await push_event(client_id, EventType.CELL_UPDATE, {
                 "table_id": table_id,
                 "row_index": idx,
@@ -463,7 +558,6 @@ async def calibration_node(state: AgentState) -> AgentState:
                 "value": order_product
             })
         
-        # 如果有额外备注，更新 calibrationNotes（用于前端底部面板显示）
         if note:
             await push_event(client_id, EventType.CELL_UPDATE, {
                 "table_id": table_id,
@@ -472,65 +566,108 @@ async def calibration_node(state: AgentState) -> AgentState:
                 "value": note
             })
     
-    # === 第二轮：LLM 智能复核（仅对需要复核的项）===
-    if need_llm_review and content_type in ["handwriting", "mixed"]:
+    # === 手写体：LLM 智能推断 ===
+    if need_llm_items and is_handwriting:
         await push_event(client_id, EventType.CHAT_MESSAGE, {
             "role": "agent",
-            "content": f"🤖 正在进行 AI 智能校对 ({len(need_llm_review)} 项)..."
+            "content": f"🤖 AI 正在分析 {len(need_llm_items)} 个手写商品名..."
         })
         
-        for item in need_llm_review:
+        for item in need_llm_items:
             try:
-                # 构建 Turbo 校对 prompt
-                candidates_str = "\n".join([f"  - {c}" for c in item['candidates']])
-                prompt = f"""你是一个商品名称校对专家。请根据以下信息判断识别结果是否正确。
-
-【OCR识别结果】{item['original']}
-【候选商品列表】
-{candidates_str}
-
-【任务】
-1. 分析 OCR 结果与候选商品的相似度（考虑字形、拼音、手写简化等因素）
-2. 如果能确定匹配，回复格式：✅ 建议：「原文」→「正确商品名」
-3. 如果有多个可能，回复格式：❓ 可能是：商品A 或 商品B
-4. 如果完全无法匹配，回复格式：❌ 未找到匹配，请手动校对
-
-【注意】
-- 手写中 "歺" 常代表 "餐"
-- 手写中 "与" 形状可能是 "歺"
-- 只回复一行建议，不要解释"""
-
-                llm_result = await llm_service.call_calibration_model(prompt)
-                llm_result = llm_result.strip()
+                candidates_str = "\n".join([f"- {c}" for c in item['candidates']]) if item['candidates'] else "（无候选）"
                 
-                # 更新"订单商品"列（LLM 智能校对结果）
-                if llm_result:
-                    calibration_count += 1
-                    await push_event(client_id, EventType.CELL_UPDATE, {
-                        "table_id": table_id,
-                        "row_index": item['idx'],
-                        "col_key": "订单商品",
-                        "value": llm_result
-                    })
-                    
+                prompt = HANDWRITING_CALIBRATION_PROMPT.format(
+                    recognized_name=item['original'],
+                    candidates=candidates_str
+                )
+                
+                # 调用 Turbo 模型推断
+                llm_result = await llm_service.call_turbo_model(
+                    messages=[
+                        {"role": "system", "content": "你是商品名称校对专家，擅长分析手写字迹。只输出 JSON。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.1
+                )
+                
+                # 解析 LLM 结果
+                order_product = _parse_calibration_result(llm_result, item['original'])
+                
+                await push_event(client_id, EventType.CELL_UPDATE, {
+                    "table_id": table_id,
+                    "row_index": item['idx'],
+                    "col_key": "订单商品",
+                    "value": order_product
+                })
+                
             except Exception as e:
-                logger.error(f"[Calibration] LLM review failed for row {item['idx']}: {str(e)}")
+                logger.error(f"[Calibration] LLM failed for row {item['idx']}: {str(e)}")
+                await push_event(client_id, EventType.CELL_UPDATE, {
+                    "table_id": table_id,
+                    "row_index": item['idx'],
+                    "col_key": "订单商品",
+                    "value": "❌ AI分析失败"
+                })
     
-    # 通知前端：校对完成
+    # 汇总通知
     total_rows = len(rows)
-    if calibration_count > 0:
-        await push_event(client_id, EventType.CHAT_MESSAGE, {
-            "role": "agent",
-            "content": f"✅ 校对完成: {total_rows} 行数据，{calibration_count} 条建议"
-        })
-    else:
-        await push_event(client_id, EventType.CHAT_MESSAGE, {
-            "role": "agent",
-            "content": f"✅ 校对完成: {total_rows} 行数据，无异常"
-        })
+    summary_parts = []
+    if exact_match_count > 0:
+        summary_parts.append(f"精确匹配 {exact_match_count} 项")
+    if fuzzy_match_count > 0:
+        summary_parts.append(f"模糊匹配 {fuzzy_match_count} 项")
+    if need_llm_items:
+        summary_parts.append(f"AI推断 {len(need_llm_items)} 项")
+    
+    summary = "、".join(summary_parts) if summary_parts else "无匹配"
+    
+    await push_event(client_id, EventType.CHAT_MESSAGE, {
+        "role": "agent",
+        "content": f"✅ 校对完成: {total_rows} 行数据 ({summary})"
+    })
     
     state["next_node"] = "end"
     return state
+
+
+def _parse_calibration_result(llm_result: str, original: str) -> str:
+    """解析 LLM 校对结果"""
+    import json
+    
+    try:
+        # 尝试解析 JSON
+        result = llm_result.strip()
+        if result.startswith("```"):
+            result = result.split("```")[1]
+            if result.startswith("json"):
+                result = result[4:]
+        
+        data = json.loads(result)
+        
+        if data.get("match"):
+            confidence = data.get("confidence", "中")
+            if confidence == "高":
+                return data["match"]
+            else:
+                return f"✅ {data['match']}"
+        elif data.get("candidates"):
+            return f"❓ 可能: {' / '.join(data['candidates'][:3])}"
+        elif data.get("note"):
+            return f"❌ {data['note']}"
+        else:
+            return f"❓ {original}"
+            
+    except Exception:
+        # JSON 解析失败，尝试直接使用文本
+        if "✅" in llm_result or "→" in llm_result:
+            return llm_result.strip()[:50]
+        elif "❓" in llm_result:
+            return llm_result.strip()[:50]
+        elif "❌" in llm_result:
+            return llm_result.strip()[:50]
+        else:
+            return f"❓ {original}"
 
 
 async def audio_node(state: AgentState) -> AgentState:
@@ -666,10 +803,14 @@ async def chat_node(state: AgentState) -> AgentState:
 {ctx.get_context_for_llm(n=5)}
 {table_info}
 
+【重要规则】
+- **默认表格**：用户未明确指定表格时，所有操作默认在"当前激活"的表格上执行，无需询问用户。
+- **行号规则**："第一行"对应 row_index=1，"第二行"对应 row_index=2，以此类推。
+
 【你可以做的】
 - **智能填表**：如果用户发来一段包含商品和数量的文本（如"土豆 50斤，白菜 20斤"），请直接调用 `smart_fill` 工具，将用户输入的原始文本原样传进去，不要自行提取。
 - **查询商品**：如果用户问"有没有土豆"或"土豆多少钱"，请调用 `query_product`。
-- **操作表格**：新建表格、添加行、删除行、修改单元格。
+- **操作表格**：新建表格、添加行、删除行、修改单元格（不用传 table_id，默认操作当前表格）。
 - **统计计算**：计算总价、数量合计等。
 - 闲聊咨询直接回复即可。
 
@@ -944,9 +1085,12 @@ async def _execute_tool(
         value = args.get("value", "")
         target_table_id = args.get("table_id")
         
-        # 优先使用工具参数中的 table_id，其次使用上下文中的 activeTableId，最后使用 table_id 参数
-        active_table_id = table_context.get("activeTableId") if table_context else None
-        final_table_id = target_table_id or active_table_id or table_id
+        # 优先使用工具参数中的 table_id，其次使用上下文中的表格ID，最后使用 table_id 参数
+        context_table_id = None
+        if table_context:
+            context_table_id = table_context.get("activeTableId") or table_context.get("id")
+            
+        final_table_id = target_table_id or context_table_id or table_id
         
         if not final_table_id:
             return "❓ 请先选择要修改的表格"
@@ -964,11 +1108,16 @@ async def _execute_tool(
         return f"✅ 已将第 {row_index + 1} 行的「{column}」改为「{value}」"
     
     elif tool_name == "smart_fill":
+        from app.services.aliyun_llm import llm_service
+        
         text = args.get("text", "")
         target_table_id = args.get("table_id")
         
-        active_table_id = table_context.get("activeTableId") if table_context else None
-        final_table_id = target_table_id or active_table_id or table_id
+        context_table_id = None
+        if table_context:
+            context_table_id = table_context.get("activeTableId") or table_context.get("id")
+            
+        final_table_id = target_table_id or context_table_id or table_id
         
         if not final_table_id:
             # 如果没有表格，生成一个临时的 ID
@@ -979,7 +1128,11 @@ async def _execute_tool(
         extraction_prompt = UNSTRUCTURED_EXTRACTION_PROMPT.format(text=text)
         
         try:
-            extracted_json_str = await llm_service.call_extraction_model(extraction_prompt)
+            # 使用 Turbo 模型进行提取
+            extracted_json_str = await llm_service.call_turbo_model(
+                messages=[{"role": "user", "content": extraction_prompt}],
+                temperature=0.1
+            )
             import json
             extracted_rows = json.loads(extracted_json_str)
             
@@ -1055,8 +1208,11 @@ async def _execute_tool(
         data = args.get("data", {})
         target_table_id = args.get("table_id")
         
-        active_table_id = table_context.get("activeTableId") if table_context else None
-        final_table_id = target_table_id or active_table_id or table_id
+        context_table_id = None
+        if table_context:
+            context_table_id = table_context.get("activeTableId") or table_context.get("id")
+            
+        final_table_id = target_table_id or context_table_id or table_id
         
         if not final_table_id:
             return "❓ 请先选择要添加数据的表格"
@@ -1076,8 +1232,11 @@ async def _execute_tool(
             row_index -= 1  # 转为 0-based
         
         target_table_id = args.get("table_id")
-        active_table_id = table_context.get("activeTableId") if table_context else None
-        final_table_id = target_table_id or active_table_id or table_id
+        context_table_id = None
+        if table_context:
+            context_table_id = table_context.get("activeTableId") or table_context.get("id")
+            
+        final_table_id = target_table_id or context_table_id or table_id
         
         if not final_table_id:
             return "❓ 请先选择要删除数据的表格"
@@ -1215,18 +1374,21 @@ async def end_node(state: AgentState) -> AgentState:
     task_id = state["task_id"]
     client_id = state["client_id"]
     error = state.get("error")
+    table_id = state.get("table_id")
     
     if error:
         await push_error(client_id, task_id, error)
         await push_event(client_id, EventType.TASK_FINISH, {
             "task_id": task_id,
             "status": "error",
-            "error": error
+            "error": error,
+            "table_id": table_id,
         })
     else:
         await push_event(client_id, EventType.TASK_FINISH, {
             "task_id": task_id,
-            "status": "success"
+            "status": "success",
+            "table_id": table_id,
         })
     
     logger.info(f"[End] Task {task_id} finished, error={error}")
@@ -1284,18 +1446,18 @@ def create_workflow() -> StateGraph:
         {"llm_node": "llm_node", "end": "end"}
     )
     
-    # Excel -> Push
+    # Excel -> LLM (统一清洗)
     workflow.add_conditional_edges(
         "excel_node",
         route_by_next_node,
-        {"push_rows_node": "push_rows_node", "end": "end"}
+        {"llm_node": "llm_node", "end": "end"}
     )
     
-    # Word -> LLM or Push
+    # Word -> LLM (统一清洗)
     workflow.add_conditional_edges(
         "word_node",
         route_by_next_node,
-        {"llm_node": "llm_node", "push_rows_node": "push_rows_node", "end": "end"}
+        {"llm_node": "llm_node", "end": "end"}
     )
     
     # LLM -> Push

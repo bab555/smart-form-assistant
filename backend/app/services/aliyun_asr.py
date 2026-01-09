@@ -1,121 +1,164 @@
 """
-DashScope 语音识别服务 (Paraformer)
+DashScope 语音识别服务
 
-使用阿里云 DashScope 的 Paraformer 模型进行语音识别
-与 LLM 服务使用相同的 API Key
+使用阿里云 DashScope 的 qwen3-asr-flash-realtime 模型
+基于 WebSocket 实时流式识别
 """
 import base64
-import httpx
+import json
+import asyncio
 from typing import Optional
+import websockets
 from app.core.config import settings
 from app.core.logger import app_logger as logger
 
 
 class DashScopeASRService:
-    """DashScope Paraformer 语音识别服务"""
+    """DashScope 实时语音识别服务 (WebSocket)"""
     
     def __init__(self):
         """初始化 ASR 服务"""
-        self.api_key = settings.DASHSCOPE_API_KEY
-        self.base_url = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"
-        logger.info("DashScope ASR 服务初始化完成")
+        # DashScope 使用 sk-...（百炼 API Key）
+        self.api_key = settings.DASHSCOPE_API_KEY or (settings.ALIYUN_ACCESS_KEY_ID if settings.ALIYUN_ACCESS_KEY_ID.startswith("sk-") else "")
+        self.model = settings.ALIYUN_ASR_MODEL
+        self.base_url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+        logger.info(f"DashScope ASR 服务初始化完成，模型: {self.model}")
     
     async def recognize_audio(
         self,
         audio_data: bytes,
-        format: str = "webm",
-        sample_rate: int = 16000
+        format: str = "pcm",
+        sample_rate: int = 16000,
+        language: str = "zh"
     ) -> str:
         """
-        识别音频文件
+        识别音频数据
         
         Args:
-            audio_data: 音频字节数据
-            format: 音频格式（webm/wav/mp3/pcm）
-            sample_rate: 采样率
+            audio_data: 音频字节数据（PCM 格式最佳）
+            format: 音频格式（pcm/wav/webm）
+            sample_rate: 采样率，默认 16000
+            language: 语言，默认中文
             
         Returns:
             str: 识别的文本
         """
         if not self.api_key:
-            logger.error("DASHSCOPE_API_KEY 未配置")
+            logger.error("ALIYUN_ACCESS_KEY_ID 未配置")
             return "语音识别服务未配置"
         
+        url = f"{self.base_url}?model={self.model}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "OpenAI-Beta": "realtime=v1"
+        }
+        
+        recognized_text = ""
+        
         try:
-            # 将音频数据转换为 base64
-            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-            
-            # 使用 DashScope 的实时语音识别 API
-            # 参考: https://help.aliyun.com/zh/dashscope/developer-reference/paraformer-real-time-speech-recognition
-            
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
-            
-            # 使用一句话识别模型
-            payload = {
-                "model": "paraformer-v2",
-                "input": {
-                    "audio": audio_base64,
-                    "format": format,
-                    "sample_rate": sample_rate,
-                },
-                "parameters": {
-                    "language_hints": ["zh", "en"],  # 支持中英文
-                }
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self.base_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=30.0
-                )
+            async with websockets.connect(url, extra_headers=headers) as ws:
+                logger.info(f"[ASR] WebSocket 已连接")
                 
-                if response.status_code == 200:
-                    result = response.json()
+                # 1. 发送会话配置（启用服务端 VAD）
+                session_update = {
+                    "event_id": "event_session",
+                    "type": "session.update",
+                    "session": {
+                        "modalities": ["text"],
+                        "input_audio_format": format,
+                        "sample_rate": sample_rate,
+                        "input_audio_transcription": {
+                            "language": language,
+                        },
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.2,
+                            "silence_duration_ms": 800
+                        }
+                    }
+                }
+                await ws.send(json.dumps(session_update))
+                logger.debug(f"[ASR] 发送会话配置")
+                
+                # 2. 分块发送音频数据
+                chunk_size = 3200  # 每次发送 3200 字节（100ms 的 16kHz PCM）
+                total_chunks = (len(audio_data) + chunk_size - 1) // chunk_size
+                
+                for i in range(0, len(audio_data), chunk_size):
+                    chunk = audio_data[i:i + chunk_size]
+                    encoded_chunk = base64.b64encode(chunk).decode('utf-8')
                     
-                    # 解析结果
-                    output = result.get("output", {})
+                    audio_event = {
+                        "event_id": f"event_audio_{i}",
+                        "type": "input_audio_buffer.append",
+                        "audio": encoded_chunk
+                    }
+                    await ws.send(json.dumps(audio_event))
                     
-                    # 实时识别返回格式
-                    if "sentence" in output:
-                        text = output["sentence"].get("text", "")
-                    # 异步识别返回格式
-                    elif "results" in output:
-                        results = output["results"]
-                        if results:
-                            text = results[0].get("text", "")
-                        else:
-                            text = ""
-                    # 直接文本格式
-                    elif "text" in output:
-                        text = output["text"]
-                    else:
-                        text = str(output)
-                    
-                    logger.info(f"ASR 识别成功: {text}")
-                    return text.strip() if text else "无法识别语音内容"
-                else:
-                    error_msg = response.text
-                    logger.error(f"ASR 识别失败: {response.status_code} - {error_msg}")
-                    
-                    # 尝试解析错误信息
+                    # 模拟实时发送，但可以加快
+                    await asyncio.sleep(0.01)
+                
+                logger.info(f"[ASR] 音频数据发送完成，共 {total_chunks} 块")
+                
+                # 3. 发送提交信号
+                commit_event = {
+                    "event_id": "event_commit",
+                    "type": "input_audio_buffer.commit"
+                }
+                await ws.send(json.dumps(commit_event))
+                
+                # 4. 接收识别结果
+                timeout = 10  # 10秒超时
+                start_time = asyncio.get_event_loop().time()
+                
+                while True:
                     try:
-                        error_json = response.json()
-                        error_msg = error_json.get("message", error_msg)
-                    except:
-                        pass
-                    
-                    return f"语音识别失败: {error_msg}"
-                    
-        except httpx.TimeoutException:
-            logger.error("ASR 识别超时")
-            return "语音识别超时，请重试"
+                        # 设置接收超时
+                        remaining = timeout - (asyncio.get_event_loop().time() - start_time)
+                        if remaining <= 0:
+                            logger.warning("[ASR] 接收超时")
+                            break
+                        
+                        message = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                        data = json.loads(message)
+                        event_type = data.get("type", "")
+                        
+                        logger.debug(f"[ASR] 收到事件: {event_type}")
+                        
+                        # 处理转写结果
+                        if event_type == "conversation.item.input_audio_transcription.completed":
+                            transcript = data.get("transcript", "")
+                            if transcript:
+                                recognized_text = transcript
+                                logger.info(f"[ASR] 识别完成: {recognized_text}")
+                            break
+                        
+                        # 处理增量转写
+                        elif event_type == "conversation.item.input_audio_transcription.delta":
+                            delta = data.get("delta", "")
+                            recognized_text += delta
+                        
+                        # 处理错误
+                        elif event_type == "error":
+                            error_msg = data.get("error", {}).get("message", "未知错误")
+                            logger.error(f"[ASR] 服务端错误: {error_msg}")
+                            return f"语音识别错误: {error_msg}"
+                        
+                        # 会话结束
+                        elif event_type == "session.closed":
+                            break
+                            
+                    except asyncio.TimeoutError:
+                        logger.warning("[ASR] 接收消息超时")
+                        break
+                
+                return recognized_text.strip() if recognized_text else "无法识别语音内容"
+                
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.error(f"[ASR] WebSocket 连接关闭: {e}")
+            return "语音识别连接断开"
         except Exception as e:
-            logger.error(f"ASR 识别异常: {str(e)}")
+            logger.error(f"[ASR] 识别异常: {str(e)}")
             return f"语音识别出错: {str(e)}"
     
     async def recognize_audio_file(self, file_path: str) -> str:
@@ -135,12 +178,11 @@ class DashScopeASRService:
         ext = file_path.split('.')[-1].lower()
         format_map = {
             'wav': 'wav',
+            'pcm': 'pcm',
             'mp3': 'mp3',
             'webm': 'webm',
-            'ogg': 'ogg',
-            'pcm': 'pcm',
         }
-        audio_format = format_map.get(ext, 'wav')
+        audio_format = format_map.get(ext, 'pcm')
         
         return await self.recognize_audio(audio_data, format=audio_format)
 

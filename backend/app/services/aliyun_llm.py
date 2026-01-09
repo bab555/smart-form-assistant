@@ -12,8 +12,42 @@ class AliyunLLMService:
     
     def __init__(self):
         """初始化服务"""
-        dashscope.api_key = settings.ALIYUN_ACCESS_KEY_ID
+        # DashScope 使用 sk-...（百炼 API Key）
+        api_key = settings.DASHSCOPE_API_KEY
+        if not api_key and settings.ALIYUN_ACCESS_KEY_ID.startswith("sk-"):
+            # 兼容旧配置：如果用户仍把 sk-... 放在 ALIYUN_ACCESS_KEY_ID
+            api_key = settings.ALIYUN_ACCESS_KEY_ID
+
+        if not api_key:
+            logger.warning("⚠️ 未配置 DASHSCOPE_API_KEY（sk-...），DashScope LLM 调用将不可用")
+        dashscope.api_key = api_key
         logger.info("阿里云 LLM 服务初始化完成")
+
+    async def warmup(self) -> None:
+        """
+        启动预热：提前完成依赖加载/首个请求的握手开销，降低首个任务延迟。
+        注意：这会产生极少量的模型调用开销。
+        """
+        if not dashscope.api_key:
+            logger.info("跳过 LLM 预热：未配置 DASHSCOPE_API_KEY")
+            return
+
+        try:
+            # 轻量 warmup：各模型各 1 次，token 极少
+            await self.call_main_model(
+                messages=[{"role": "user", "content": "ping"}],
+                temperature=0.0,
+                max_tokens=1,
+            )
+            await self.call_turbo_model(
+                messages=[{"role": "user", "content": "ping"}],
+                temperature=0.0,
+                max_tokens=1,
+            )
+            logger.info("✅ LLM 模型预热完成")
+        except Exception as e:
+            # 预热失败不影响启动，避免阻塞服务
+            logger.warning(f"⚠️ LLM 模型预热失败（忽略，不阻塞启动）: {str(e)}")
     
     async def call_main_model(
         self,
@@ -178,13 +212,22 @@ class AliyunLLMService:
                 
                 # 检查是否有工具调用
                 if hasattr(message, 'tool_calls') and message.tool_calls:
-                    result["tool_calls"] = [
-                        {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                        for tc in message.tool_calls
-                    ]
+                    parsed_tool_calls = []
+                    for tc in message.tool_calls:
+                        # 兼容对象和字典两种格式（DashScope SDK 版本差异）
+                        if isinstance(tc, dict):
+                            func = tc.get("function", {})
+                            parsed_tool_calls.append({
+                                "name": func.get("name", ""),
+                                "arguments": func.get("arguments", {})
+                            })
+                        else:
+                            # 对象格式
+                            parsed_tool_calls.append({
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            })
+                    result["tool_calls"] = parsed_tool_calls
                     logger.info(f"主控模型调用工具: {[tc['name'] for tc in result['tool_calls']]}")
                 
                 return result

@@ -15,7 +15,7 @@ import type { ColDef, CellValueChangedEvent, ICellRendererParams } from 'ag-grid
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
 import { useCanvasStore, TableData, TableRow } from '@/store/useCanvasStore';
-import { AlertTriangle, Loader2, X, Plus, Download, Calendar, User, Minus, Store, ClipboardList, AlertCircle } from 'lucide-react';
+import { AlertTriangle, Loader2, X, Plus, Download, Calendar, User, Minus, Store, ClipboardList, AlertCircle, Send } from 'lucide-react';
 import { exportTableToExcel, exportAllTablesToExcel } from '@/utils/export';
 import { ContextMenu, MenuItem } from './ContextMenu';
 import './TableCard.css';
@@ -261,6 +261,16 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     updateMetadata(table.id, { date: e.target.value });
   };
 
+  // 提交当前订单（预留功能）
+  const handleSubmitCurrent = useCallback(() => {
+    alert('当前表格已打包完毕，后端暂未连接提交服务');
+  }, []);
+
+  // 提交所有订单（预留功能）
+  const handleSubmitAll = useCallback(() => {
+    alert('所有表格已打包完毕，后端暂未连接提交服务');
+  }, []);
+
   // 获取当前客户的餐厅和订单类型列表
   const currentRestaurants = table.metadata.customerId 
     ? (MOCK_RESTAURANTS[table.metadata.customerId as string] || []) 
@@ -434,9 +444,13 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
           )}
         </div>
         <div className="header-right">
-          <button className="action-btn add-btn" onClick={handleAddRow} title="添加行">
-            <Plus size={14} />
-            <span>添加行</span>
+          <button className="action-btn submit-btn" onClick={handleSubmitCurrent} title="提交当前订单">
+            <Send size={14} />
+            <span>提交当前订单</span>
+          </button>
+          <button className="action-btn submit-btn" onClick={handleSubmitAll} title="提交所有订单">
+            <Send size={14} />
+            <span>提交所有订单</span>
           </button>
         </div>
       </div>
@@ -503,6 +517,12 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
             title="自动同步系统时间（编辑时暂停同步）"
           />
         </div>
+
+        {/* 添加行按钮 */}
+        <button className="add-row-btn" onClick={handleAddRow} title="添加行">
+          <Plus size={14} />
+          <span>添加行</span>
+        </button>
       </div>
 
       {/* 表格主体 */}
@@ -543,6 +563,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
           </div>
         </div>
       )}
+      
     </div>
   );
 };

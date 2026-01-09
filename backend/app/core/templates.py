@@ -29,6 +29,7 @@ DEFAULT_HEADERS = ["序号", "识别商品", "规格", "单位", "数量", "备�
 FIELD_ALIASES = {
     "序号": ["序号", "编号", "行号", "index", "no", "no.", "#"],
     "识别商品": ["识别商品", "品名", "商品名", "商品名称", "名称", "产品", "产品名", "品种", "货物", "物品", "商品"],
+    "订单商品": ["订单商品", "校对商品", "标准商品", "规范商品", "匹配商品"],
     "数量": ["数量", "数目", "件数", "个数", "份数", "qty", "quantity", "count"],
     "单位": ["单位", "计量单位", "unit", "uom"],
     "规格": ["规格", "规格型号", "型号", "大小", "尺寸", "包装", "spec", "specification"],
@@ -65,19 +66,32 @@ def normalize_field_name(field: str) -> str:
     Returns:
         标准化后的字段名，如果无法匹配则返回原字段名
     """
-    field_lower = field.lower().strip()
+    field_stripped = field.strip()
+    field_lower = field_stripped.lower()
     
+    # 精确匹配（中文直接比较，英文忽略大小写）
     for standard_name, aliases in FIELD_ALIASES.items():
-        if field_lower == standard_name:
+        # 直接匹配标准名
+        if field_stripped == standard_name:
             return standard_name
+        # 匹配别名列表
         for alias in aliases:
-            if alias.lower() == field_lower: # 精确匹配优先
+            if field_stripped == alias or field_lower == alias.lower():
                 return standard_name
     
-    # 模糊匹配
+    # 模糊匹配（包含关系）
+    # 注意：这里不要用过短/过泛的别名（例如“商品”）做包含匹配，否则会把“订单商品”误归为“识别商品”，
+    # 导致在 map_row_to_template 时用空的“订单商品”覆盖“识别商品”。
+    generic_aliases = {"商品", "产品", "物品", "货物"}
     for standard_name, aliases in FIELD_ALIASES.items():
         for alias in aliases:
-            if alias.lower() in field_lower:
+            if not alias:
+                continue
+            if alias in generic_aliases:
+                continue
+            if len(alias) < 3:
+                continue
+            if alias in field_stripped or alias.lower() in field_lower:
                 return standard_name
                 
     return field
@@ -93,48 +107,70 @@ def map_row_to_template(row: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         映射后的行数据
     """
+    from app.core.logger import app_logger as logger
+    
     mapped = create_empty_row()
     
     for key, value in row.items():
         normalized = normalize_field_name(key)
-        # 即使 normalized 是 "单价" 或 "总价"，如果 Schema 里没这俩字段，也会被忽略吗？
-        # mapped 是基于 create_empty_row 的，如果 Schema 只有 品名/数量... 
-        # 那么 "单价" 不会进去。
-        # 但为了保留数据，我们可以允许动态扩充，或者严格遵守 Schema。
-        # 根据 Phase 2.1 需求："固定 Schema"，所以这里只保留 Schema 内字段。
+        logger.debug(f"[Map] '{key}' -> '{normalized}' (in mapped: {normalized in mapped})")
         if normalized in mapped:
             mapped[normalized] = value
+        else:
+            logger.warning(f"[Map] Field '{key}' (normalized: '{normalized}') not in schema, ignored")
     
     return mapped
 
 
 # ========== LLM 提示词模板 ==========
 
-UNSTRUCTURED_EXTRACTION_PROMPT = """你是一个订单录入助手。请从以下文本中提取订单商品信息。
+# 提取提示词：让模型自己理解内容含义
+EXTRACTION_PROMPT = """请阅读以下文本，找出其中的**商品信息**。
 
-目标字段（严格按此顺序提取）：
-- 序号：如有编号提取，无则留空
-- 识别商品：商品名称（原始识别结果）
-- 规格：商品规格描述
-- 单位：计量单位（如斤、个、箱）
-- 数量：数量数值
-- 备注：其他附加信息
+你需要理解文本内容，识别出：
+- 哪些是**商品名称**（如：海天老抽、白醋、酱油、生抽、味事达、料酒、土豆、白菜、鸡蛋等食品/物品的名字）
+- 哪些是**规格**（如：500ml、1.9L、2.7千克 等容量/重量描述）
+- 哪些是**单位**（如：瓶、箱、桶、斤、袋、个 等计量单位）
+- 哪些是**数量**（购买的数目）
 
 文本内容：
 {text}
 
-请输出 JSON 数组，每个商品一个对象：
+请输出 JSON 数组，每个商品一条记录：
 ```json
 [
-  {{"序号": "1", "识别商品": "土豆", "规格": "大", "单位": "斤", "数量": 50, "备注": "要新鲜的"}},
-  ...
+  {{"序号": "1", "识别商品": "海天老抽", "规格": "1.9L", "单位": "瓶", "数量": 5, "备注": ""}},
+  {{"序号": "2", "识别商品": "白醋", "规格": "500ml", "单位": "瓶", "数量": 3, "备注": ""}}
 ]
 ```
 
-规则：
-1. 如果某字段找不到，留空字符串 ""
-2. 数量尽量转为数字
-3. 如果有多个商品，提取所有
+注意：
+1. "识别商品"填的是具体商品名字（如"海天老抽"、"白醋"），不是"商品名称"这四个字
+2. 如果某信息找不到，留空 ""
+3. 数量是数字，找不到填 0
 4. 只输出 JSON，不要解释"""
+
+
+# 手写体校对提示词：基于候选列表推断
+HANDWRITING_CALIBRATION_PROMPT = """你是商品名称校对专家。用户手写的商品名可能有错别字或简写，请根据候选列表推断最可能的商品。
+
+【识别结果】{recognized_name}
+【候选商品】
+{candidates}
+
+【任务】
+1. 分析"识别结果"与每个候选的相似度（考虑：字形相似、读音相近、常见简写）
+2. 选择最可能的 1-3 个结果
+
+【输出格式】
+如果能确定匹配，输出：{{"match": "匹配的商品名", "confidence": "高/中/低"}}
+如果有多个可能，输出：{{"candidates": ["候选1", "候选2"], "confidence": "低"}}
+如果完全无法匹配，输出：{{"match": null, "note": "未找到匹配商品"}}
+
+只输出 JSON。"""
+
+
+# 保留旧名称兼容
+UNSTRUCTURED_EXTRACTION_PROMPT = EXTRACTION_PROMPT
 
 
