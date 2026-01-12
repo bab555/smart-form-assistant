@@ -562,6 +562,17 @@ class FastProductIndex:
             "unique_chars": len(self.char_index),
             "bigrams": len(self.bigram_index),
         }
+    
+    def get_all_names(self, limit: Optional[int] = 500) -> List[str]:
+        """获取商品名称列表（用于 LLM 校对参考）
+
+        Args:
+            limit: 限制返回条数；为 None 则返回全部
+        """
+        names = list(self.by_name.keys())
+        if limit is None:
+            return names
+        return names[:limit]
 
 
 # ========== 全局实例 ==========

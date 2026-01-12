@@ -21,23 +21,16 @@ async def startup_event(app: FastAPI):
         await vector_store.initialize(force_rebuild=False)
         logger.info("✅ 向量存储初始化完成")
 
-        # 预加载/预热模型服务（避免在 graph 首次用到时才初始化）
-        # - OCR/VL：构造单例 + 设置 api_key
-        # - LLM：可选做一次轻量 warmup，降低首个任务延迟
+        # 预热模型服务
         logger.info("正在初始化模型服务...")
         from app.services.aliyun_llm import llm_service
-        from app.services.aliyun_ocr import ocr_service  # noqa: F401
-        from app.services.aliyun_asr import asr_service  # noqa: F401
 
         await llm_service.warmup()
         logger.info("✅ 模型服务初始化完成")
         
-        # 打印配置信息
-        logger.info(f"📦 主控模型: {settings.ALIYUN_LLM_MODEL_MAIN}")
-        logger.info(f"📦 校对模型: {settings.ALIYUN_LLM_MODEL_CALIBRATION}")
-        logger.info(f"📦 印刷体OCR: {settings.ALIYUN_OCR_MODEL}")
-        logger.info(f"📦 手写体VL: {settings.ALIYUN_VL_MODEL}")
-        logger.info(f"📦 语音识别: {settings.ALIYUN_ASR_MODEL}")
+        # 打印配置信息（简化版：只显示实际使用的模型）
+        logger.info(f"📦 中控模型: {settings.ALIYUN_LLM_MODEL_MAIN}")
+        logger.info(f"📦 视觉模型: {settings.ALIYUN_VL_MODEL}")
         logger.info(f"📦 向量索引: {settings.FAISS_INDEX_PATH}")
         
         logger.info("=" * 60)

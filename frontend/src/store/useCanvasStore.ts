@@ -63,10 +63,28 @@ export interface CanvasState {
   
   // Actions - 连接状态
   setConnected: (isConnected: boolean) => void;
+
+  // UI - 客户选择高亮
+  customerHighlightUntil: Record<string, number>; // tableId -> timestamp(ms)
+  highlightCustomerSelect: (tableId: string, durationMs?: number) => void;
+  
+  // UI - "请选择客户" 全局弹窗
+  showCustomerModal: boolean;
+  customerModalTableId: string | null;
+  openCustomerModal: (tableId: string) => void;
+  closeCustomerModal: () => void;
+
+  // UI - 居中提示（用于“多表需分别选择客户”等场景）
+  centerNotice: { visible: boolean; message: string; type: 'warning' | 'info' | 'success' | 'error' };
+  showCenterNotice: (message: string, type?: 'warning' | 'info' | 'success' | 'error') => void;
+  hideCenterNotice: () => void;
   
   // Actions - 批量操作
   clearAll: () => void;
   importTables: (tables: Record<string, TableData>) => void;
+  
+  // 多表场景：只清空指定表格的客户选择
+  resetCustomers: (tableIds: string[]) => void;
 }
 
 // ========== 基础模板（标准订单格式） ==========
@@ -84,11 +102,19 @@ const DEFAULT_SCHEMA: ColumnSchema[] = [
 const createDefaultTable = (id: string, options?: Partial<TableData>): TableData => {
   const schema = options?.schema || DEFAULT_SCHEMA;
   
-  // 确保至少有一行数据，避免 react-datasheet-grid 空数据 bug
-  const defaultRow = schema.reduce((acc, col) => {
-    acc[col.key] = col.type === 'number' ? 0 : '';
-    return acc;
-  }, {} as TableRow);
+  // 如果明确传入 rows（包括空数组），使用传入的值
+  // 只有在没有传入 rows 时才使用默认空行
+  let rows: TableRow[];
+  if (options?.rows !== undefined) {
+    rows = options.rows;
+  } else {
+    // 确保至少有一行数据，避免 react-datasheet-grid 空数据 bug（仅在用户手动创建表格时）
+    const defaultRow = schema.reduce((acc, col) => {
+      acc[col.key] = col.type === 'number' ? 0 : '';
+      return acc;
+    }, {} as TableRow);
+    rows = [defaultRow];
+  }
   
   return {
     id,
@@ -96,20 +122,39 @@ const createDefaultTable = (id: string, options?: Partial<TableData>): TableData
     position: options?.position || { x: 0, y: 0 },
     size: options?.size || { width: 800, height: 600 },
     schema,
-    rows: options?.rows?.length ? options.rows : [defaultRow],
+    rows,
     metadata: options?.metadata || {},
     calibrationNotes: {},
     isStreaming: false,
   };
 };
 
+// ========== 默认表格 ==========
+
+const DEFAULT_TABLE_ID = 'sheet_default';
+const DEFAULT_TABLE: TableData = {
+  id: DEFAULT_TABLE_ID,
+  title: 'Sheet1',
+  position: { x: 0, y: 0 },
+  size: { width: 800, height: 600 },
+  schema: DEFAULT_SCHEMA,
+  rows: [],  // 空行，等待用户填入或后端推送
+  metadata: {},
+  calibrationNotes: {},
+  isStreaming: false,
+};
+
 // ========== Store ==========
 
 export const useCanvasStore = create<CanvasState>((set) => ({
-  // 初始状态
-  tables: {},
-  activeTableId: null,
+  // 初始状态：自带一个默认表格，避免"没有当前表格"问题
+  tables: { [DEFAULT_TABLE_ID]: DEFAULT_TABLE },
+  activeTableId: DEFAULT_TABLE_ID,
   isConnected: false,
+  customerHighlightUntil: {},
+  showCustomerModal: false,
+  customerModalTableId: null,
+  centerNotice: { visible: false, message: '', type: 'warning' },
 
   // 表格管理
   createTable: (options) => {
@@ -127,9 +172,26 @@ export const useCanvasStore = create<CanvasState>((set) => ({
   removeTable: (tableId) => {
     set((state) => {
       const { [tableId]: removed, ...rest } = state.tables;
+      const remainingCount = Object.keys(rest).length;
+      
+      // 如果删除后没有表格了，自动创建一个新的默认表格
+      if (remainingCount === 0) {
+        const newId = `sheet_${Date.now()}`;
+        const newTable = createDefaultTable(newId, { title: 'Sheet1', rows: [] });
+        return {
+          tables: { [newId]: newTable },
+          activeTableId: newId,
+        };
+      }
+      
+      // 否则正常删除，切换到其他表格
+      const newActiveId = state.activeTableId === tableId 
+        ? Object.keys(rest)[0] 
+        : state.activeTableId;
+      
       return {
         tables: rest,
-        activeTableId: state.activeTableId === tableId ? null : state.activeTableId,
+        activeTableId: newActiveId,
       };
     });
   },
@@ -357,6 +419,40 @@ export const useCanvasStore = create<CanvasState>((set) => ({
     set({ isConnected });
   },
 
+  // UI - 客户选择高亮
+  highlightCustomerSelect: (tableId, durationMs = 3000) => {
+    const until = Date.now() + durationMs;
+    set((state) => ({
+      customerHighlightUntil: { ...state.customerHighlightUntil, [tableId]: until },
+    }));
+
+    // 到期自动清理（容错：若期间再次触发，以最新 until 为准）
+    setTimeout(() => {
+      set((state) => {
+        const current = state.customerHighlightUntil[tableId] || 0;
+        if (current > Date.now()) return state;
+        const next = { ...state.customerHighlightUntil };
+        delete next[tableId];
+        return { customerHighlightUntil: next };
+      });
+    }, durationMs + 50);
+  },
+
+  // UI - "请选择客户" 全局弹窗
+  openCustomerModal: (tableId) => {
+    set({ showCustomerModal: true, customerModalTableId: tableId });
+  },
+  closeCustomerModal: () => {
+    set({ showCustomerModal: false, customerModalTableId: null });
+  },
+
+  showCenterNotice: (message, type = 'warning') => {
+    set({ centerNotice: { visible: true, message, type } });
+  },
+  hideCenterNotice: () => {
+    set({ centerNotice: { visible: false, message: '', type: 'warning' } });
+  },
+
   // 批量操作
   clearAll: () => {
     set({ tables: {}, activeTableId: null });
@@ -364,5 +460,30 @@ export const useCanvasStore = create<CanvasState>((set) => ({
 
   importTables: (tables) => {
     set({ tables });
+  },
+
+  resetCustomers: (tableIds: string[]) => {
+    set((state) => {
+      const newTables = { ...state.tables };
+      
+      tableIds.forEach((id) => {
+        if (newTables[id]) {
+          newTables[id] = {
+            ...newTables[id],
+            metadata: {
+              ...newTables[id].metadata,
+              customerId: '',
+              customer: '',
+              restaurantId: '',
+              restaurant: '',
+              orderTypeId: '',
+              orderType: '',
+            },
+          };
+        }
+      });
+      
+      return { tables: newTables };
+    });
   },
 }));

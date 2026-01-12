@@ -340,7 +340,7 @@
 .attachment-file .file-name {
   font-size: 13px;
   font-weight: 600;
-  color: #334155;
+  color: #000 !important; /* 强制黑色 */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -348,16 +348,16 @@
 }
 
 .message.user .attachment-file .file-name {
-  color: white;
+  color: #000 !important; /* 用户消息里也强制黑色 */
 }
 
 .attachment-file .file-size {
   font-size: 11px;
-  color: #94a3b8;
+  color: #333 !important; /* 深灰色 */
 }
 
 .message.user .attachment-file .file-size {
-  color: rgba(255, 255, 255, 0.7);
+  color: #333 !important;
 }
 
 /* ============ 图片预览弹窗 ============ */
@@ -583,4 +583,96 @@
     overflow: hidden;
     border-right: none;
   }
+}
+
+/* ============ 预览内容美化 ============ */
+.preview-content-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  font-size: 14px;
+  color: #334155;
+}
+
+.preview-h3 {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1e293b;
+  margin: 8px 0 4px;
+  padding-left: 12px;
+  border-left: 4px solid #3b82f6;
+  line-height: 1.4;
+}
+
+.preview-p {
+  margin: 0;
+  line-height: 1.6;
+  color: #475569;
+}
+
+.preview-table-wrapper {
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: white;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.preview-table th {
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 600;
+  text-align: left;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.preview-table td {
+  padding: 10px 16px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #334155;
+}
+
+.preview-table tr:last-child td {
+  border-bottom: none;
+}
+
+.preview-table tr:hover td {
+  background: #f8fafc;
+}
+
+.preview-empty {
+  text-align: center;
+  color: #94a3b8;
+  padding: 40px;
+  font-style: italic;
+}
+
+/* ============ 补丁：预览提示文字 ============ */
+.file-preview-hint {
+  font-size: 12px;
+  color: #3b82f6 !important; /* 强制蓝色，醒目 */
+  margin-left: auto;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.8);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.attachment-file.previewable {
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.attachment-file.previewable:hover {
+  background: #f1f5f9 !important; /* hover 变深一点 */
+  border-color: #3b82f6;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.15);
 }

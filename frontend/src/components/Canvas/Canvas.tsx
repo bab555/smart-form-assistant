@@ -12,7 +12,8 @@ import { useCanvasStore } from '@/store/useCanvasStore';
 import { TableCard } from './TableCard';
 import { ContextMenu, createCanvasMenuItems } from './ContextMenu';
 import { exportAllTablesToExcel, exportTableToExcel } from '@/utils/export';
-import { Plus, Clock, Download, X, AlertCircle } from 'lucide-react';
+import { Plus, Clock, Download, X, AlertCircle, AlertTriangle, Info, CheckCircle, XCircle } from 'lucide-react';
+import { toast } from '@/components/Toast';
 import './Canvas.css';
 
 interface ContextMenuState {
@@ -30,11 +31,17 @@ export const Canvas: React.FC = () => {
   const tables = useCanvasStore(state => state.tables);
   const activeTableId = useCanvasStore(state => state.activeTableId);
   const isConnected = useCanvasStore(state => state.isConnected);
+  const showCustomerModal = useCanvasStore(state => state.showCustomerModal);
+  const customerModalTableId = useCanvasStore(state => state.customerModalTableId);
+  const centerNotice = useCanvasStore(state => state.centerNotice);
   
   // Store Actions
   const createTable = useCanvasStore(state => state.createTable);
   const setActiveTable = useCanvasStore(state => state.setActiveTable);
   const removeTable = useCanvasStore(state => state.removeTable);
+  const highlightCustomerSelect = useCanvasStore(state => state.highlightCustomerSelect);
+  const closeCustomerModal = useCanvasStore(state => state.closeCustomerModal);
+  const hideCenterNotice = useCanvasStore(state => state.hideCenterNotice);
 
   const activeTable = activeTableId ? tables[activeTableId] : null;
 
@@ -109,8 +116,16 @@ export const Canvas: React.FC = () => {
 
   // 导出所有表格
   const handleExportAll = useCallback(() => {
+    // 全局规则：未选客户，不允许任何操作
+    if (!activeTableId) return; // 理论上不会发生
+    const active = tables[activeTableId];
+    if (!active?.metadata?.customerId) {
+      toast.error('请先选择客户');
+      highlightCustomerSelect(activeTableId, 3000);
+      return;
+    }
     exportAllTablesToExcel(tables);
-  }, [tables]);
+  }, [tables, activeTableId, highlightCustomerSelect]);
 
   // 画布右键菜单项（仅导出所有）
   const canvasMenuItems = createCanvasMenuItems(
@@ -118,8 +133,54 @@ export const Canvas: React.FC = () => {
     Object.keys(tables).length > 0
   );
 
+  // 关闭"请选择客户"弹窗并高亮
+  const handleCloseCustomerModal = useCallback(() => {
+    closeCustomerModal();
+    if (customerModalTableId) {
+      highlightCustomerSelect(customerModalTableId, 3000);
+    }
+  }, [closeCustomerModal, customerModalTableId, highlightCustomerSelect]);
+
   return (
     <div className="canvas-container" onContextMenu={handleContextMenu}>
+      {/* 居中提示：用于多表需要分别选择客户等场景（不复用“请选择客户”弹窗） */}
+      {centerNotice.visible && (
+        <div className="center-notice-overlay">
+          <div className="center-notice-backdrop" onClick={hideCenterNotice} />
+          <div className={`center-notice toast toast-${centerNotice.type}`}>
+            <div className="center-notice-icon">
+              {centerNotice.type === 'warning' && <AlertTriangle size={18} />}
+              {centerNotice.type === 'info' && <Info size={18} />}
+              {centerNotice.type === 'success' && <CheckCircle size={18} />}
+              {centerNotice.type === 'error' && <XCircle size={18} />}
+            </div>
+            <div className="center-notice-message">{centerNotice.message}</div>
+            <button className="center-notice-close" onClick={hideCenterNotice} title="关闭">
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 全局"请选择客户"弹窗 - 居中大弹窗 */}
+      {showCustomerModal && (
+        <div className="customer-modal-overlay">
+          <div className="customer-modal-backdrop" onClick={handleCloseCustomerModal} />
+          <div className="customer-modal">
+            <div className="customer-modal-icon">
+              <AlertCircle size={64} />
+            </div>
+            <h2 className="customer-modal-title">请先选择客户</h2>
+            <p className="customer-modal-desc">
+              在进行任何操作之前，请先在表格顶部选择客户。
+            </p>
+            <button className="customer-modal-btn" onClick={handleCloseCustomerModal}>
+              我知道了
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 关闭确认弹窗 */}
       {closingTableId && (
         <div className="template-modal-overlay">

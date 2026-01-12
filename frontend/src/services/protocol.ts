@@ -21,6 +21,9 @@ export enum EventType {
   NODE_START = 'node_start',
   NODE_FINISH = 'node_finish',
   
+  // 代理状态
+  AGENT_STATE = 'agent_state',
+  
   // 数据更新 (核心)
   ROW_COMPLETE = 'row_complete',
   TABLE_REPLACE = 'table_replace',
@@ -109,6 +112,13 @@ export interface ChatMessagePayload {
   role: 'user' | 'agent' | 'system';
   content: string;
   content_type: 'text' | 'markdown';
+  // 流式扩展
+  is_thinking?: boolean;
+  is_delta?: boolean;
+}
+
+export interface AgentStatePayload {
+  state: 'idle' | 'thinking' | 'extracting' | 'calibrating' | 'reading_file' | 'error';
 }
 
 export interface ErrorPayload {

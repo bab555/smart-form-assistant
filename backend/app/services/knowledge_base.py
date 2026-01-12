@@ -7,6 +7,7 @@
 3. Excel 导入导出
 4. 向量检索（兜底，可选）
 """
+import json
 import pickle
 import pandas as pd
 import numpy as np
@@ -52,6 +53,42 @@ class KnowledgeBaseService:
         # 持久化路径
         self.index_path = self.data_dir / "product_index.pkl"
         self.excel_path = self.data_dir / "商品库.xlsx"
+        self.product_names_path = self.data_dir / "product_names.json"
+
+        # 缓存：避免频繁 json.dumps
+        self._product_names_cache: Optional[List[str]] = None
+        self._product_names_json_cache: Optional[str] = None
+
+    def _refresh_product_names_cache(self) -> None:
+        names = self.product_index.get_all_names(limit=None)
+        self._product_names_cache = names
+        self._product_names_json_cache = json.dumps(names, ensure_ascii=False)
+
+    def _save_product_names_json(self) -> None:
+        """将商品库名称列表持久化为 JSON（用于校对时直接注入给 LLM）"""
+        try:
+            self._refresh_product_names_cache()
+            with open(self.product_names_path, "w", encoding="utf-8") as f:
+                f.write(self._product_names_json_cache or "[]")
+            logger.info(f"商品名 JSON 已保存到 {self.product_names_path}")
+        except Exception as e:
+            logger.warning(f"保存商品名 JSON 失败（忽略）: {str(e)}")
+
+    def get_product_names_json(self) -> str:
+        """获取商品库名称 JSON 字符串（优先走缓存）"""
+        if self._product_names_json_cache:
+            return self._product_names_json_cache
+        # 尝试从文件读取（避免大库时重算）
+        try:
+            if self.product_names_path.exists():
+                content = self.product_names_path.read_text(encoding="utf-8")
+                self._product_names_json_cache = content
+                return content
+        except Exception:
+            pass
+        # 兜底：从索引重建
+        self._refresh_product_names_cache()
+        return self._product_names_json_cache or "[]"
     
     async def initialize(self, force_rebuild: bool = False):
         """
@@ -69,6 +106,8 @@ class KnowledgeBaseService:
             try:
                 self._load_index()
                 self.initialized = True
+                # 同步商品名 JSON
+                self._save_product_names_json()
                 logger.info(f"✅ 知识库从缓存加载，共 {self.product_index.total_count} 条商品")
                 return
             except Exception as e:
@@ -147,6 +186,9 @@ class KnowledgeBaseService:
             # 保存缓存
             if save_cache:
                 self._save_index()
+
+            # 同步商品名 JSON（每次导入都刷新）
+            self._save_product_names_json()
             
             # 更新全局实例
             global product_index
@@ -196,6 +238,8 @@ class KnowledgeBaseService:
             with open(self.index_path, 'wb') as f:
                 pickle.dump(self.product_index, f)
             logger.info(f"索引已保存到 {self.index_path}")
+            # 同步商品名 JSON（防止只保存索引不更新 JSON）
+            self._save_product_names_json()
         except Exception as e:
             logger.error(f"保存索引失败: {str(e)}")
     
@@ -207,6 +251,9 @@ class KnowledgeBaseService:
         # 更新全局实例
         global product_index
         product_index = self.product_index
+        # 刷新缓存（JSON 文件由 initialize 调用 _save_product_names_json 生成）
+        self._product_names_cache = None
+        self._product_names_json_cache = None
     
     # ========== 检索接口 ==========
     

@@ -1,57 +1,55 @@
 # FastAPI Core
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-python-multipart==0.0.6
-python-dotenv==1.0.0
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+aiofiles
 
 # Aliyun DashScope (LLM/Embedding/VL)
 dashscope==1.14.1
 
-# Aliyun OCR OpenAPI SDK (Tea SDK, for printed OCR fast path)
-alibabacloud-ocr-api20210707==3.1.3
-alibabacloud-tea-openapi==0.4.2
-alibabacloud-tea-util==0.3.14
+# Aliyun OCR OpenAPI SDK (Legacy support)
+alibabacloud-ocr-api20210707
+alibabacloud-tea-openapi
+alibabacloud-tea-util
 
-# LangChain Ecosystem
-langchain==0.1.4
-langchain-community==0.0.16
-langgraph==0.0.20
-langchain-core==0.1.16
-
-# Vector Database
-faiss-cpu==1.7.4
-numpy==1.26.3
+# Vector Database / Search
+faiss-cpu
+numpy
+rapidfuzz
 
 # Data Processing
-pydantic==2.5.3
-pydantic-settings==2.1.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+tabulate
 
 # Document Processing
-pandas==2.1.4
-openpyxl==3.1.2
-python-docx==1.1.0
-python-pptx==0.6.23
-pdf2image==1.17.0
-Pillow==10.2.0
+pandas
+openpyxl
+xlrd>=2.0.1
+python-docx
+python-pptx
+pdf2image
+Pillow
 
 # HTTP Client
-httpx==0.26.0
-aiohttp==3.9.1
+httpx
+aiohttp
 
 # Database (Mock mode only)
-pymysql==1.1.0
-sqlalchemy==2.0.25
+pymysql
+sqlalchemy
 
 # Utilities
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-python-Levenshtein==0.23.0
-pypinyin==0.50.0
-websockets==12.0
+python-jose[cryptography]
+passlib[bcrypt]
+python-Levenshtein
+pypinyin
+websockets
 
 # Logging
-loguru==0.7.2
+loguru
 
 # Testing
-pytest==7.4.4
-pytest-asyncio==0.23.3
+pytest
+pytest-asyncio

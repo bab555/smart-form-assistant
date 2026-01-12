@@ -15,9 +15,10 @@ import type { ColDef, CellValueChangedEvent, ICellRendererParams } from 'ag-grid
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
 import { useCanvasStore, TableData, TableRow } from '@/store/useCanvasStore';
-import { AlertTriangle, Loader2, X, Plus, Download, Calendar, User, Minus, Store, ClipboardList, AlertCircle, Send } from 'lucide-react';
+import { AlertTriangle, Loader2, X, Plus, Download, Calendar, User, Store, ClipboardList, AlertCircle, Send } from 'lucide-react';
 import { exportTableToExcel, exportAllTablesToExcel } from '@/utils/export';
 import { ContextMenu, MenuItem } from './ContextMenu';
+import { wsClient } from '@/services/websocket';
 import './TableCard.css';
 
 // 格式化日期为 datetime-local 输入框格式
@@ -97,8 +98,51 @@ const RowActionsCellRenderer: React.FC<ICellRendererParams & { onDelete: (rowInd
         onClick={handleDelete}
         title="删除此行"
       >
-        <Minus size={14} />
+        删除
       </button>
+    </div>
+  );
+};
+
+// "订单商品"单元格渲染器
+// - exact: 直接显示
+// - fuzzy: 显示⚠️ + 最接近结果，点击弹窗
+// - not_found: 显示"库中没有该商品"
+const OrderProductCellRenderer: React.FC<ICellRendererParams & { 
+  tableId: string; 
+  customerId?: string; 
+  onRequireCustomer: () => void;
+  onOpenProductPicker: (rowIndex: number) => void;
+}> = (props) => {
+  const rowIndex = props.rowIndex;
+  const row = (props.data || {}) as any;
+  const status = row.__order_status as string | undefined;
+  const fuzzyMatch = (row.__fuzzy_match || '') as string;
+  const value = (row['订单商品'] || '') as string;
+  const calibrationHint = (row.__calibration_hint || '') as string;
+
+  // 未选客户：不允许编辑/选择
+  const disabled = !props.customerId;
+
+  // 统一：不论是否精确/模糊/无匹配，都允许点开弹窗（弹窗展示完整商品库名称列表）
+  return (
+    <div
+      className={`order-product-clickable ${status === 'fuzzy' ? 'order-fuzzy-cell' : ''} ${status === 'not_found' ? 'order-not-found' : ''} ${disabled ? 'disabled' : ''}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (disabled) return props.onRequireCustomer();
+        props.onOpenProductPicker(rowIndex);
+      }}
+      title="点击从完整商品库中选择"
+    >
+      {status === 'fuzzy' && <span className="fuzzy-warning">⚠️</span>}
+      <span className="fuzzy-text">
+        {status === 'fuzzy'
+          ? (fuzzyMatch || value || '待确认')
+          : status === 'not_found'
+            ? (calibrationHint || '库中没有该商品')
+            : (value || '（点击选择商品）')}
+      </span>
     </div>
   );
 };
@@ -116,6 +160,8 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   const deleteRow = useCanvasStore((state) => state.deleteRow);
   const clearCalibrationNote = useCanvasStore((state) => state.clearCalibrationNote);
   const updateMetadata = useCanvasStore((state) => state.updateMetadata);
+  const customerHighlightUntil = useCanvasStore((state) => state.customerHighlightUntil);
+  const openCustomerModal = useCanvasStore((state) => state.openCustomerModal);
   
   // 右键菜单状态
   const [contextMenu, setContextMenu] = useState<{ isOpen: boolean; x: number; y: number }>({
@@ -126,6 +172,68 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   
   // 删除行确认弹窗
   const [deletingRowIndex, setDeletingRowIndex] = useState<number | null>(null);
+  // "替换为订单商品"弹窗
+  const [applyingRowIndex, setApplyingRowIndex] = useState<number | null>(null);
+  // 商品选择弹窗（点击感叹号触发）
+  const [productPickerState, setProductPickerState] = useState<{
+    isOpen: boolean;
+    rowIndex: number;
+  }>({ isOpen: false, rowIndex: -1 });
+
+  // 商品库名称列表（全量）
+  const [productNames, setProductNames] = useState<string[]>([]);
+  const [productNamesLoading, setProductNamesLoading] = useState(false);
+  const [productSearch, setProductSearch] = useState('');
+
+  const normalize = useCallback((s: string) => s.trim().toLowerCase().replace(/\s+/g, ''), []);
+
+  const fuzzyScore = useCallback((text: string, query: string) => {
+    // 简单模糊匹配评分：
+    // - 完全相等：1000
+    // - 包含：700 - index
+    // - 子序列匹配（按顺序包含每个字符）：最多 500 - gap
+    const t = normalize(text);
+    const q = normalize(query);
+    if (!q) return 1;
+    if (t === q) return 1000;
+    const idx = t.indexOf(q);
+    if (idx >= 0) return 700 - Math.min(idx, 200);
+
+    // 子序列
+    let ti = 0;
+    let matched = 0;
+    let first = -1;
+    let last = -1;
+    for (let qi = 0; qi < q.length; qi++) {
+      const ch = q[qi];
+      let found = false;
+      while (ti < t.length) {
+        if (t[ti] === ch) {
+          found = true;
+          if (first < 0) first = ti;
+          last = ti;
+          ti += 1;
+          break;
+        }
+        ti += 1;
+      }
+      if (!found) return 0;
+      matched += 1;
+    }
+    const span = first >= 0 && last >= 0 ? (last - first + 1) : 9999;
+    const gaps = span - matched;
+    return Math.max(0, 500 - Math.min(gaps, 500));
+  }, [normalize]);
+
+  const filteredProductNames = useMemo(() => {
+    const q = productSearch.trim();
+    if (!q) return productNames.slice(0, 500);
+    const scored = productNames
+      .map((name) => ({ name, score: fuzzyScore(name, q) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score || a.name.length - b.name.length);
+    return scored.slice(0, 500).map((x) => x.name);
+  }, [productNames, productSearch, fuzzyScore]);
 
   // 时间输入框是否正在编辑（用户操作期间停止自动同步）
   const isEditingTimeRef = useRef<boolean>(false);
@@ -184,17 +292,33 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   // 添加新行
   const handleAddRow = useCallback((e?: React.MouseEvent) => {
     e?.stopPropagation();
+    if (!table.metadata.customerId) {
+      openCustomerModal(table.id);
+      return;
+    }
     addRow(table.id);
-  }, [table.id, addRow]);
+  }, [table.id, table.metadata.customerId, addRow, openCustomerModal]);
 
   // 删除行（显示确认弹窗）
   const handleDeleteRowRequest = useCallback((rowIndex: number) => {
+    if (!table.metadata.customerId) {
+      openCustomerModal(table.id);
+      return;
+    }
     // 如果只剩一行，不允许删除
     if (table.rows.length <= 1) {
       return;
     }
     setDeletingRowIndex(rowIndex);
-  }, [table.rows.length]);
+  }, [table.rows.length, table.metadata.customerId, table.id, openCustomerModal]);
+
+  const handleApplyOrderRequest = useCallback((rowIndex: number) => {
+    if (!table.metadata.customerId) {
+      openCustomerModal(table.id);
+      return;
+    }
+    setApplyingRowIndex(rowIndex);
+  }, [table.id, table.metadata.customerId, openCustomerModal]);
 
   // 确认删除行
   const confirmDeleteRow = useCallback(() => {
@@ -204,10 +328,91 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     }
   }, [table.id, deletingRowIndex, deleteRow]);
 
+  const closeApplyModal = useCallback(() => setApplyingRowIndex(null), []);
+
+  // 打开商品选择弹窗（点击感叹号）
+  const ensureProductNamesLoaded = useCallback(async () => {
+    if (productNames.length > 0 || productNamesLoading) return;
+    setProductNamesLoading(true);
+    try {
+      const resp = await fetch('/api/products/names');
+      if (!resp.ok) throw new Error('获取商品库失败');
+      const names = await resp.json();
+      if (Array.isArray(names)) setProductNames(names.map((x) => String(x)));
+    } catch {
+      // ignore: modal 内提示
+      setProductNames([]);
+    } finally {
+      setProductNamesLoading(false);
+    }
+  }, [productNames.length, productNamesLoading]);
+
+  const openProductPicker = useCallback((rowIndex: number) => {
+    setProductSearch('');
+    setProductPickerState({ isOpen: true, rowIndex });
+    void ensureProductNamesLoaded();
+  }, [ensureProductNamesLoaded]);
+
+  // 关闭商品选择弹窗
+  const closeProductPicker = useCallback(() => {
+    setProductPickerState({ isOpen: false, rowIndex: -1 });
+  }, []);
+
+  // 选择商品（商品选择弹窗中用户选择后）
+  const handleProductSelect = useCallback((selectedProduct: string) => {
+    const { rowIndex } = productPickerState;
+    if (rowIndex < 0) return;
+    
+    // 通过 WebSocket 请求后端处理（包含覆盖规格/单位 + 可选的偏好保存）
+    const row = table.rows[rowIndex] as any;
+    const recognized = (row?.['识别商品'] || '').toString();
+    
+    // 发送请求，让后端覆盖 订单商品、规格、单位 + 记录偏好
+    wsClient.send('apply_order_product', {
+      table_id: table.id,
+      row_index: rowIndex,
+      mode: 'A', // 默认记录偏好
+      recognized,
+      selected: selectedProduct,
+      order_value: selectedProduct,
+      customer_id: table.metadata.customerId || '',
+    });
+    
+    closeProductPicker();
+  }, [productPickerState, table.id, table.metadata.customerId, table.rows, closeProductPicker]);
+
+  const confirmApplyOrder = useCallback(async (mode: 'A' | 'B' | 'C') => {
+    if (applyingRowIndex === null) return;
+    if (mode === 'C') {
+      closeApplyModal();
+      return;
+    }
+    const row = table.rows[applyingRowIndex] as any;
+    const recognized = (row?.['识别商品'] || '').toString();
+    const selected = (row?.__order_selected || '').toString();
+    const orderValue = (row?.['订单商品'] || '').toString();
+
+    wsClient.send('apply_order_product', {
+      table_id: table.id,
+      row_index: applyingRowIndex,
+      mode,
+      recognized,
+      selected,
+      order_value: orderValue,
+      customer_id: table.metadata.customerId || '',
+    });
+
+    closeApplyModal();
+  }, [applyingRowIndex, closeApplyModal, table.id, table.metadata.customerId, table.rows]);
+
   // 导出所有
   const handleExportAll = useCallback(() => {
+    if (!table.metadata.customerId) {
+      openCustomerModal(table.id);
+      return;
+    }
     exportAllTablesToExcel(tables);
-  }, [tables]);
+  }, [tables, table.id, table.metadata.customerId, openCustomerModal]);
 
   // 关闭当前 Sheet
   const handleCloseSheet = useCallback(() => {
@@ -219,8 +424,12 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   // 导出
   const handleExport = useCallback((e?: React.MouseEvent) => {
     e?.stopPropagation();
+    if (!table.metadata.customerId) {
+      openCustomerModal(table.id);
+      return;
+    }
     exportTableToExcel(table);
-  }, [table]);
+  }, [table, openCustomerModal]);
 
   // 元数据变更
   const handleClientChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -263,13 +472,21 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
 
   // 提交当前订单（预留功能）
   const handleSubmitCurrent = useCallback(() => {
+    if (!table.metadata.customerId) {
+      openCustomerModal(table.id);
+      return;
+    }
     alert('当前表格已打包完毕，后端暂未连接提交服务');
-  }, []);
+  }, [table.id, table.metadata.customerId, openCustomerModal]);
 
   // 提交所有订单（预留功能）
   const handleSubmitAll = useCallback(() => {
+    if (!table.metadata.customerId) {
+      openCustomerModal(table.id);
+      return;
+    }
     alert('所有表格已打包完毕，后端暂未连接提交服务');
-  }, []);
+  }, [table.id, table.metadata.customerId, openCustomerModal]);
 
   // 获取当前客户的餐厅和订单类型列表
   const currentRestaurants = table.metadata.customerId 
@@ -285,10 +502,11 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     const dataCols = table.schema.map((col, index) => {
       const isNumber = col.type === 'number';
       const isLastDataCol = index === table.schema.length - 1;
+      const isOrderProduct = col.key === '订单商品';
       return {
         field: col.key,
         headerName: col.title,
-        editable: true,
+        editable: !isOrderProduct, // 订单商品使用自定义渲染（内部输入框/单选）
         // 最后一列使用 flex 填充剩余空间
         ...(isLastDataCol 
           ? { flex: 1, minWidth: col.width || 150 } 
@@ -303,8 +521,22 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
               return Number.isFinite(n) ? n : 0;
             }
           : undefined,
-        // 如果是"订单商品"列（校对结果），给予特殊样式
-        cellStyle: col.key === '订单商品' ? { color: '#2563eb', fontWeight: 500 } : undefined,
+        // 如果是"订单商品"列（校对结果），给予特殊样式 + 自定义渲染
+        cellStyle: isOrderProduct ? { color: '#2563eb', fontWeight: 500 } : undefined,
+        ...(isOrderProduct
+          ? {
+              cellRenderer: OrderProductCellRenderer,
+              autoHeight: true,
+              cellRendererParams: {
+                tableId: table.id,
+                customerId: table.metadata.customerId,
+                onRequireCustomer: () => {
+                  openCustomerModal(table.id);
+                },
+                onOpenProductPicker: openProductPicker,
+              },
+            }
+          : {}),
       } as ColDef<TableRow>;
     });
     
@@ -312,7 +544,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     const actionCol: ColDef<TableRow> = {
       headerName: '',
       field: '__actions__',
-      width: 50,
+      width: 86,
       pinned: 'right',
       lockPosition: true,
       resizable: false,
@@ -326,7 +558,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     };
     
     return [...dataCols, actionCol];
-  }, [table.schema, handleDeleteRowRequest]);
+  }, [table.schema, table.id, table.metadata.customerId, handleDeleteRowRequest, handleApplyOrderRequest, openCustomerModal, openProductPicker]);
 
   const defaultColDef = useMemo<ColDef<TableRow>>(
     () => ({
@@ -341,6 +573,11 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     const rowIndex = e.rowIndex;
     const field = e.colDef.field;
     if (rowIndex == null || !field) return;
+    // 全局规则：未选客户，不允许任何操作（包含编辑表格）
+    if (!table.metadata.customerId) {
+      openCustomerModal(table.id);
+      return;
+    }
     updateCell(table.id, rowIndex, field, e.newValue);
   };
 
@@ -367,7 +604,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     },
     {
       label: '删除选中行',
-      icon: <Minus size={14} />,
+      icon: <X size={14} />,
       onClick: () => {
         // 删除最后一行（或选中行，这里简化处理）
         if (table.rows.length > 1) {
@@ -432,6 +669,72 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
           </div>
         </div>
       )}
+
+      {/* "替换为订单商品"弹窗（A/B/C） */}
+      {applyingRowIndex !== null && (
+        <div className="confirm-modal-overlay">
+          <div className="confirm-modal-backdrop" onClick={closeApplyModal} />
+          <div className="confirm-modal">
+            <div className="confirm-header">
+              <AlertTriangle size={20} className="icon-warning" />
+              <span>自动填入订单商品信息</span>
+            </div>
+            <div className="confirm-body">
+              <p>将使用商品库中的规格/单位覆盖当前行（数量不变）。</p>
+              <p className="confirm-hint">A 会记录该客户的"识别商品→订单商品"偏好，用于后续校对增强。</p>
+            </div>
+            <div className="confirm-footer">
+              <button className="btn-primary" onClick={() => confirmApplyOrder('A')}>A：储存偏好并填入</button>
+              <button className="btn-secondary" onClick={() => confirmApplyOrder('B')}>B：不储存填入</button>
+              <button className="btn-cancel" onClick={() => confirmApplyOrder('C')}>C：取消</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 商品选择弹窗（点击感叹号后触发） */}
+      {productPickerState.isOpen && (
+        <div className="confirm-modal-overlay product-picker-overlay">
+          <div className="confirm-modal-backdrop" onClick={closeProductPicker} />
+        <div className="product-picker-modal large">
+            <div className="confirm-header">
+              <AlertTriangle size={20} className="icon-warning" />
+              <span>请选择商品（完整商品库）</span>
+            </div>
+            <div className="product-picker-body">
+              <p className="picker-hint">从完整商品库中搜索并选择正确的商品：</p>
+              <input
+                className="picker-search"
+                placeholder="搜索商品名..."
+                value={productSearch}
+                onChange={(e) => setProductSearch(e.target.value)}
+              />
+              {productNamesLoading ? (
+                <div className="picker-loading">加载商品库中...</div>
+              ) : filteredProductNames.length === 0 ? (
+                <div className="product-empty">没有匹配到商品，请换个关键词试试</div>
+              ) : (
+                <div className="product-grid">
+                  {filteredProductNames.map((product, index) => (
+                    <button
+                      key={`${product}_${index}`}
+                      className="product-chip"
+                      onClick={() => handleProductSelect(product)}
+                      title={product}
+                    >
+                      {product}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <p className="picker-note">选择后将自动覆盖「识别商品」「规格」「单位」并记录偏好。</p>
+            </div>
+            <div className="confirm-footer">
+              <button className="btn-cancel" onClick={closeProductPicker}>取消</button>
+            </div>
+          </div>
+        </div>
+      )}
       
       {/* 标题栏 / 工具栏 */}
       <div className="table-card-header">
@@ -457,7 +760,11 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
 
       {/* 订单元数据区域 */}
       <div className="metadata-panel">
-        <div className="metadata-item">
+        <div
+          className={`metadata-item customer-select-wrapper ${
+            (customerHighlightUntil[table.id] || 0) > Date.now() ? 'customer-highlight' : ''
+          }`}
+        >
           <User size={14} className="meta-icon" />
           <span className="meta-label">客户:</span>
           <select 

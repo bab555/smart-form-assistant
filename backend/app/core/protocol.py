@@ -26,6 +26,9 @@ class EventType(str, Enum):
     NODE_START = "node_start"              # 节点开始 (可选)
     NODE_FINISH = "node_finish"            # 节点完成 (可选)
     
+    # Agent 状态
+    AGENT_STATE = "agent_state"            # Agent 状态变化
+    
     # 数据更新 (核心)
     ROW_COMPLETE = "row_complete"          # 行级流式：追加一行
     TABLE_REPLACE = "table_replace"        # 全量替换表格

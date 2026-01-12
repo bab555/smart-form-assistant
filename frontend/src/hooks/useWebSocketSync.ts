@@ -4,7 +4,7 @@
  * 将后端推送的事件同步到 CanvasStore
  */
 
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import { wsClient } from '@/services/websocket';
 import { EventType } from '@/services/protocol';
 import { useCanvasStore } from '@/store/useCanvasStore';
@@ -22,6 +22,13 @@ export function useWebSocketSync() {
   const updateMetadata = useCanvasStore((state) => state.updateMetadata);
   const setStreaming = useCanvasStore((state) => state.setStreaming);
   const setConnected = useCanvasStore((state) => state.setConnected);
+  const resetCustomers = useCanvasStore((state) => state.resetCustomers);
+  const showCenterNotice = useCanvasStore((state) => state.showCenterNotice);
+
+  // 记录单次任务中创建的表格数量
+  const tasksCreatedTablesRef = useRef<number>(0);
+  // 记录单次任务中新创建的表格ID列表（用于清理客户信息）
+  const taskNewTableIdsRef = useRef<string[]>([]);
 
   // 处理 CONNECTION_ACK
   const handleConnectionAck = useCallback(() => {
@@ -41,6 +48,7 @@ export function useWebSocketSync() {
       metadata: data.metadata,
     });
     setStreaming(tableId, true);
+    tasksCreatedTablesRef.current += 1;
   }, [createTable, setStreaming]);
 
   // 处理 ROW_COMPLETE
@@ -107,14 +115,32 @@ export function useWebSocketSync() {
     const { tool, params } = data;
     console.log('[Sync] Tool call:', tool, params);
     
-    // create_table 不需要 activeTableId
+    // create_table 不需要 activeTableId（文件上传时后端仍会用到）
     if (tool === 'create_table') {
       createTable({
         id: params.table_id,
         title: params.title || '新表格',
         schema: params.schema,
-        rows: params.data,
+        rows: params.rows || params.data || [],  // 支持 rows 参数，空数组避免默认空行
+        metadata: params.metadata || undefined,
       });
+      tasksCreatedTablesRef.current += 1;
+      if (params.table_id) {
+        taskNewTableIdsRef.current.push(params.table_id);
+      }
+      return;
+    }
+    
+    // switch_table: 切换激活表格
+    if (tool === 'switch_table') {
+      const targetId = params.table_id;
+      const { tables, setActiveTable } = useCanvasStore.getState();
+      if (targetId && tables[targetId]) {
+        setActiveTable(targetId);
+        console.log('[Sync] Switched to table:', targetId);
+      } else {
+        console.warn('[Sync] Table not found:', targetId);
+      }
       return;
     }
     
@@ -151,6 +177,10 @@ export function useWebSocketSync() {
     const { table_id } = data;
     console.log('[Sync] Task start:', data);
     
+    // 重置本次任务创建的表格计数与ID列表
+    tasksCreatedTablesRef.current = 0;
+    taskNewTableIdsRef.current = [];
+
     if (table_id) {
       setStreaming(table_id, true);
     }
@@ -164,7 +194,28 @@ export function useWebSocketSync() {
     if (table_id) {
       setStreaming(table_id, false);
     }
-  }, [setStreaming]);
+
+    // 检查是否有多表场景，强制重置**新创建表格**的客户信息
+    const { tables } = useCanvasStore.getState();
+    const tableIds = Object.keys(tables);
+    const hasMultipleTables = tableIds.length > 1;
+    const hasCreatedTables = tasksCreatedTablesRef.current > 0;
+
+    if (hasMultipleTables && hasCreatedTables) {
+      const newTableIds = taskNewTableIdsRef.current;
+      if (newTableIds.length > 0) {
+        resetCustomers(newTableIds);
+        
+        // 不复用“请选择客户”弹窗：使用居中提示
+        showCenterNotice(`检测到 ${newTableIds.length} 个新表格：已清空新表格的客户选择，请分别选择。`, 'warning');
+
+        // 切到第一个新表并高亮客户选择框
+        const { setActiveTable, highlightCustomerSelect } = useCanvasStore.getState();
+        setActiveTable(newTableIds[0]);
+        highlightCustomerSelect(newTableIds[0], 3000);
+      }
+    }
+  }, [setStreaming, resetCustomers, showCenterNotice]);
 
   // 处理 ERROR
   const handleError = useCallback((data: any) => {

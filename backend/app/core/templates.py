@@ -10,6 +10,7 @@ from typing import List, Dict, Any
 
 
 # ========== 基础模板（标准订单格式） ==========
+# 注意：单价和金额由网站端商品库自动匹配计算，订单录入不需要这两个字段
 
 DEFAULT_SCHEMA: List[Dict[str, str]] = [
     {"key": "序号", "title": "序号", "type": "text"},
@@ -26,6 +27,7 @@ DEFAULT_SCHEMA: List[Dict[str, str]] = [
 DEFAULT_HEADERS = ["序号", "识别商品", "规格", "单位", "数量", "备注"]
 
 # 字段别名映射（OCR 可能识别出的不同写法）
+# 注意：单价和金额不在映射中，因为订单录入不需要这两个字段
 FIELD_ALIASES = {
     "序号": ["序号", "编号", "行号", "index", "no", "no.", "#"],
     "识别商品": ["识别商品", "品名", "商品名", "商品名称", "名称", "产品", "产品名", "品种", "货物", "物品", "商品"],
@@ -34,8 +36,6 @@ FIELD_ALIASES = {
     "单位": ["单位", "计量单位", "unit", "uom"],
     "规格": ["规格", "规格型号", "型号", "大小", "尺寸", "包装", "spec", "specification"],
     "备注": ["备注", "说明", "注释", "note", "comment", "remark", "remarks"],
-    "单价": ["单价", "价格", "单位价格", "单位价", "price", "unit_price"], # 保留别名，用于后续扩展
-    "总价": ["总价", "金额", "总金额", "小计", "合计", "total", "amount", "total_price"], # 同上
 }
 
 
@@ -113,11 +113,12 @@ def map_row_to_template(row: Dict[str, Any]) -> Dict[str, Any]:
     
     for key, value in row.items():
         normalized = normalize_field_name(key)
-        logger.debug(f"[Map] '{key}' -> '{normalized}' (in mapped: {normalized in mapped})")
+        # logger.debug(f"[Map] '{key}' -> '{normalized}' (in mapped: {normalized in mapped})")
         if normalized in mapped:
             mapped[normalized] = value
         else:
-            logger.warning(f"[Map] Field '{key}' (normalized: '{normalized}') not in schema, ignored")
+            # logger.warning(f"[Map] Field '{key}' (normalized: '{normalized}') not in schema, ignored")
+            pass
     
     return mapped
 
@@ -148,7 +149,8 @@ EXTRACTION_PROMPT = """请阅读以下文本，找出其中的**商品信息**�
 1. "识别商品"填的是具体商品名字（如"海天老抽"、"白醋"），不是"商品名称"这四个字
 2. 如果某信息找不到，留空 ""
 3. 数量是数字，找不到填 0
-4. 只输出 JSON，不要解释"""
+4. 只输出 JSON，不要解释
+5. 不需要填写单价和金额（由系统自动计算）"""
 
 
 # 手写体校对提示词：基于候选列表推断
@@ -172,5 +174,3 @@ HANDWRITING_CALIBRATION_PROMPT = """你是商品名称校对专家。用户手�
 
 # 保留旧名称兼容
 UNSTRUCTURED_EXTRACTION_PROMPT = EXTRACTION_PROMPT
-
-

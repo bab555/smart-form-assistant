@@ -2,7 +2,7 @@
 阿里云 DashScope LLM 服务封装
 """
 import dashscope
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, AsyncGenerator
 from app.core.config import settings
 from app.core.logger import app_logger as logger
 
@@ -25,47 +25,30 @@ class AliyunLLMService:
 
     async def warmup(self) -> None:
         """
-        启动预热：提前完成依赖加载/首个请求的握手开销，降低首个任务延迟。
-        注意：这会产生极少量的模型调用开销。
+        启动预热：提前完成依赖加载/首个请求的握手开销
         """
-        if not dashscope.api_key:
-            logger.info("跳过 LLM 预热：未配置 DASHSCOPE_API_KEY")
-            return
+        if not dashscope.api_key: return
 
         try:
-            # 轻量 warmup：各模型各 1 次，token 极少
+            # 轻量 warmup
             await self.call_main_model(
-                messages=[{"role": "user", "content": "ping"}],
-                temperature=0.0,
-                max_tokens=1,
-            )
-            await self.call_turbo_model(
                 messages=[{"role": "user", "content": "ping"}],
                 temperature=0.0,
                 max_tokens=1,
             )
             logger.info("✅ LLM 模型预热完成")
         except Exception as e:
-            # 预热失败不影响启动，避免阻塞服务
-            logger.warning(f"⚠️ LLM 模型预热失败（忽略，不阻塞启动）: {str(e)}")
+            logger.warning(f"⚠️ LLM 模型预热失败（忽略）: {str(e)}")
     
+    # ================= 标准非流式调用 =================
+
     async def call_main_model(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: int = 2000
     ) -> str:
-        """
-        调用主控大模型（Qwen-Max）
-        
-        Args:
-            messages: 对话消息列表
-            temperature: 温度参数
-            max_tokens: 最大token数
-            
-        Returns:
-            str: 模型回复内容
-        """
+        """调用主控大模型（Qwen-Max）"""
         try:
             response = dashscope.Generation.call(
                 model=settings.ALIYUN_LLM_MODEL_MAIN,
@@ -78,7 +61,6 @@ class AliyunLLMService:
             
             if response.status_code == 200:
                 content = response.output.choices[0].message.content
-                logger.debug(f"主控模型返回: {content[:100]}...")
                 return content
             else:
                 logger.error(f"主控模型调用失败: {response.code} - {response.message}")
@@ -88,86 +70,25 @@ class AliyunLLMService:
             logger.error(f"主控模型调用异常: {str(e)}")
             raise
     
-    async def call_calibration_model(
-        self,
-        prompt: str,
-        temperature: float = 0.3
-    ) -> str:
-        """
-        调用校对模型（Qwen-Turbo）- 快速推理
-        
-        Args:
-            prompt: 提示词
-            temperature: 温度参数（较低以保证稳定性）
-            
-        Returns:
-            str: 模型回复
-        """
+    async def call_calibration_model(self, prompt: str, temperature: float = 0.3) -> str:
+        """调用校对模型"""
         try:
             messages = [{"role": "user", "content": prompt}]
-            
             response = dashscope.Generation.call(
                 model=settings.ALIYUN_LLM_MODEL_CALIBRATION,
                 messages=messages,
                 result_format='message',
                 temperature=temperature,
-                max_tokens=500,
                 stream=False
             )
-            
             if response.status_code == 200:
-                content = response.output.choices[0].message.content
-                logger.debug(f"校对模型返回: {content[:100]}...")
-                return content
+                return response.output.choices[0].message.content
             else:
-                logger.error(f"校对模型调用失败: {response.code}")
-                raise Exception(f"校对模型调用失败: {response.message}")
-                
+                raise Exception(f"Calibration Error: {response.message}")
         except Exception as e:
-            logger.error(f"校对模型调用异常: {str(e)}")
+            logger.error(f"Calibration Exception: {e}")
             raise
-    
-    async def call_turbo_model(
-        self,
-        messages: List[Dict[str, str]],
-        temperature: float = 0.3,
-        max_tokens: int = 2000
-    ) -> str:
-        """
-        调用 Turbo 模型（Qwen-Turbo）- 支持 messages 格式
-        
-        用于快速推理任务，如数据提取、结构化等
-        
-        Args:
-            messages: 对话消息列表
-            temperature: 温度参数
-            max_tokens: 最大 token 数
-            
-        Returns:
-            str: 模型回复
-        """
-        try:
-            response = dashscope.Generation.call(
-                model=settings.ALIYUN_LLM_MODEL_CALIBRATION,  # 使用 Turbo 模型
-                messages=messages,
-                result_format='message',
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=False
-            )
-            
-            if response.status_code == 200:
-                content = response.output.choices[0].message.content
-                logger.debug(f"Turbo 模型返回: {content[:100]}...")
-                return content
-            else:
-                logger.error(f"Turbo 模型调用失败: {response.code}")
-                raise Exception(f"Turbo 模型调用失败: {response.message}")
-                
-        except Exception as e:
-            logger.error(f"Turbo 模型调用异常: {str(e)}")
-            raise
-    
+
     async def call_with_tools(
         self,
         messages: List[Dict[str, str]],
@@ -175,21 +96,7 @@ class AliyunLLMService:
         temperature: float = 0.7,
         max_tokens: int = 2000
     ) -> Dict[str, Any]:
-        """
-        调用主控模型（带 Function Calling）
-        
-        Args:
-            messages: 对话消息列表
-            tools: 工具定义列表
-            temperature: 温度参数
-            max_tokens: 最大 token 数
-            
-        Returns:
-            Dict: {
-                "content": str,  # 文本回复（可能为空）
-                "tool_calls": List[Dict] or None  # 工具调用列表
-            }
-        """
+        """调用主控模型（带 Function Calling）"""
         try:
             response = dashscope.Generation.call(
                 model=settings.ALIYUN_LLM_MODEL_MAIN,
@@ -206,15 +113,21 @@ class AliyunLLMService:
                 message = choice.message
                 
                 result = {
-                    "content": message.content or "",
+                    "content": getattr(message, "content", "") or "",
                     "tool_calls": None
                 }
                 
-                # 检查是否有工具调用
-                if hasattr(message, 'tool_calls') and message.tool_calls:
+                # 安全获取 tool_calls
+                raw_tool_calls = None
+                try:
+                    raw_tool_calls = getattr(message, 'tool_calls', None)
+                except Exception:
+                    if isinstance(message, dict):
+                        raw_tool_calls = message.get('tool_calls')
+
+                if raw_tool_calls:
                     parsed_tool_calls = []
-                    for tc in message.tool_calls:
-                        # 兼容对象和字典两种格式（DashScope SDK 版本差异）
+                    for tc in raw_tool_calls:
                         if isinstance(tc, dict):
                             func = tc.get("function", {})
                             parsed_tool_calls.append({
@@ -223,20 +136,25 @@ class AliyunLLMService:
                             })
                         else:
                             # 对象格式
-                            parsed_tool_calls.append({
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments
-                            })
+                            try:
+                                func = getattr(tc, 'function', None)
+                                if func:
+                                    parsed_tool_calls.append({
+                                        "name": getattr(func, 'name', ""),
+                                        "arguments": getattr(func, 'arguments', {})
+                                    })
+                            except Exception:
+                                pass
+
                     result["tool_calls"] = parsed_tool_calls
-                    logger.info(f"主控模型调用工具: {[tc['name'] for tc in result['tool_calls']]}")
                 
                 return result
             else:
-                logger.error(f"主控模型(tools)调用失败: {response.code} - {response.message}")
+                logger.error(f"Tool Call Failed: {response.code} - {response.message}")
                 raise Exception(f"LLM调用失败: {response.message}")
                 
         except Exception as e:
-            logger.error(f"主控模型(tools)调用异常: {str(e)}")
+            logger.error(f"Tool Call Exception: {str(e)}")
             raise
     
     async def call_vl_model(
@@ -245,24 +163,12 @@ class AliyunLLMService:
         prompt: str = "请识别图片中的文字内容，保持原有格式",
         image_data: Optional[bytes] = None
     ) -> str:
-        """
-        调用视觉语言模型（Qwen-VL）
-        
-        Args:
-            image_url: 图片URL
-            prompt: 提示词
-            image_data: 图片二进制数据（如果提供，将优先使用，转为base64）
-            
-        Returns:
-            str: 识别结果
-        """
+        """调用视觉语言模型（Qwen-VL）"""
         try:
             content_list = []
-            
             if image_data:
                 import base64
                 base64_str = base64.b64encode(image_data).decode('utf-8')
-                # 默认使用 png 格式头，大多数情况下通用
                 final_image_url = f"data:image/png;base64,{base64_str}"
                 content_list.append({"image": final_image_url})
             elif image_url:
@@ -272,12 +178,7 @@ class AliyunLLMService:
                 
             content_list.append({"text": prompt})
             
-            messages = [
-                {
-                    "role": "user",
-                    "content": content_list
-                }
-            ]
+            messages = [{"role": "user", "content": content_list}]
             
             response = dashscope.MultiModalConversation.call(
                 model=settings.ALIYUN_VL_MODEL,
@@ -287,7 +188,6 @@ class AliyunLLMService:
             if response.status_code == 200:
                 content = response.output.choices[0].message.content
                 if isinstance(content, list):
-                    # 处理返回列表的情况
                     text_content = ""
                     for item in content:
                         if isinstance(item, dict) and "text" in item:
@@ -295,108 +195,224 @@ class AliyunLLMService:
                 elif isinstance(content, dict):
                      text_content = content.get("text", "")
                 else:
-                    text_content = str(content) # 可能是纯字符串或者对象列表的第一个元素的 text 属性，视 SDK 版本
-                    # 针对旧版 SDK 或特定返回结构的防御性处理
+                    text_content = str(content)
                     if hasattr(response.output.choices[0].message.content[0], "text"):
                          text_content = response.output.choices[0].message.content[0]["text"]
 
-                # 清洗 Markdown 代码块
+                # 清洗
                 text_content = text_content.replace("```json", "").replace("```", "").strip()
-                
-                logger.info(f"VL模型识别成功，内容长度: {len(text_content)}")
                 return text_content
             else:
-                logger.error(f"VL模型调用失败: {response.code} - {response.message}")
-                raise Exception(f"VL模型调用失败: {response.message}")
+                raise Exception(f"VL Failed: {response.message}")
                 
         except Exception as e:
-            logger.error(f"VL模型调用异常: {str(e)}")
+            logger.error(f"VL Exception: {str(e)}")
             raise
 
+    # ================= 新增：DashScope 原生流式调用 =================
+
+    async def stream_chat_with_thinking(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        thinking_budget: int = 50
+    ) -> AsyncGenerator[Dict, None]:
+        """
+        流式对话 (支持 Thinking + Content + Tools)
+        
+        策略：
+        - 流式输出 thinking 和 content
+        - 收集 tool_calls，在流式结束时通过 finish 事件一次性返回
+        - 上层只需一次调用，无需双重请求
+        """
+        try:
+            # 构造参数
+            kwargs = {
+                "model": settings.ALIYUN_LLM_MODEL_MAIN,
+                "messages": messages,
+                "result_format": "message",
+                "stream": True,
+                "incremental_output": True,
+            }
+            
+            # 只有部分模型支持 enable_thinking
+            if thinking_budget > 0:
+                kwargs["enable_thinking"] = True
+                kwargs["thinking_budget"] = thinking_budget
+            
+            if tools:
+                kwargs["tools"] = tools
+
+            logger.info(f"[Stream] 调用参数: model={kwargs.get('model')}, enable_thinking={kwargs.get('enable_thinking')}, tools={bool(tools)}")
+            
+            responses = dashscope.Generation.call(**kwargs)
+
+            # 增量累积：tool_calls 按 index 分组累积 arguments
+            tool_calls_accumulator: Dict[int, Dict] = {}  # index -> {id, name, arguments}
+            finish_reason = None
+            chunk_count = 0
+
+            for response in responses:
+                chunk_count += 1
+                if response.status_code != 200:
+                    logger.error(f"Stream Error: {response.code} - {response.message}")
+                    yield {"type": "error", "content": response.message}
+                    continue
+
+                choice = response.output.choices[0]
+                message = choice.message
+                finish_reason = choice.finish_reason
+                
+                # 调试：打印前3个chunk的完整message结构
+                if chunk_count <= 3:
+                    try:
+                        if hasattr(message, '__dict__'):
+                            msg_dict = {k: v for k, v in vars(message).items() if not k.startswith('_')}
+                        else:
+                            msg_dict = dict(message) if isinstance(message, dict) else str(message)
+                        logger.info(f"[Stream] Chunk {chunk_count} message: {msg_dict}")
+                    except Exception as e:
+                        logger.info(f"[Stream] Chunk {chunk_count} message (raw): {message}, error: {e}")
+                
+                # message 可能是对象或字典，统一处理
+                def safe_get(obj, key, default=None):
+                    if isinstance(obj, dict):
+                        return obj.get(key, default)
+                    return getattr(obj, key, default)
+                
+                reasoning_content = safe_get(message, "reasoning_content") or ""
+                content_str = safe_get(message, "content") or ""
+
+                # 严格按照官方文档逻辑判断
+                # 1. 思考过程：reasoning_content 不为空 且 content 为空
+                if reasoning_content and not content_str:
+                    logger.info(f"[Stream] Got reasoning: {reasoning_content[:50]}...")
+                    yield {"type": "thinking", "content": reasoning_content}
+                
+                # 2. 回复过程：content 不为空
+                elif content_str:
+                    yield {"type": "content", "content": content_str}
+                
+                # 3. 工具调用 (保持原逻辑)
+                tc_list = safe_get(message, "tool_calls")
+                if tc_list:
+                    for tc in tc_list:
+                        if isinstance(tc, dict):
+                            idx = tc.get("index", 0)
+                            tc_id = tc.get("id", "")
+                            func = tc.get("function", {})
+                            func_name = func.get("name", "")
+                            func_args = func.get("arguments", "")
+                        else:
+                            idx = getattr(tc, "index", 0)
+                            tc_id = getattr(tc, "id", "")
+                            func = getattr(tc, "function", None)
+                            func_name = getattr(func, "name", "") if func else ""
+                            func_args = getattr(func, "arguments", "") if func else ""
+                        
+                        # 累积
+                        if idx not in tool_calls_accumulator:
+                            tool_calls_accumulator[idx] = {"id": tc_id, "name": func_name, "arguments": ""}
+                        if tc_id:
+                            tool_calls_accumulator[idx]["id"] = tc_id
+                        if func_name:
+                            tool_calls_accumulator[idx]["name"] = func_name
+                        if func_args:
+                            tool_calls_accumulator[idx]["arguments"] += func_args
+
+            logger.info(f"[Stream] 完成: chunks={chunk_count}, finish_reason={finish_reason}, accumulated_tools={tool_calls_accumulator}")
+
+            # 流式结束：返回 finish 事件，包含完整的 tool_calls
+            parsed_tools = []
+            for idx in sorted(tool_calls_accumulator.keys()):
+                tc_data = tool_calls_accumulator[idx]
+                if tc_data.get("name"):
+                    parsed_tools.append({
+                        "name": tc_data["name"],
+                        "arguments": tc_data.get("arguments", "")
+                    })
+            
+            if parsed_tools:
+                logger.info(f"[Stream] 解析后工具: {parsed_tools}")
+
+            yield {
+                "type": "finish",
+                "finish_reason": finish_reason,
+                "tool_calls": parsed_tools if parsed_tools else None
+            }
+
+        except Exception as e:
+            logger.error(f"Stream Chat Exception: {e}")
+            yield {"type": "error", "content": str(e)}
+
+    async def stream_extraction(self, prompt: str, system_prompt: str) -> AsyncGenerator[str, None]:
+        """
+        流式提取 (用于文件/文本解析)
+        强制输出 JSON Lines
+        """
+        try:
+            responses = dashscope.Generation.call(
+                model=settings.ALIYUN_LLM_MODEL_MAIN,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                result_format="message",
+                stream=True,
+                incremental_output=True,
+                temperature=0.1 # 低温，保证 JSON 格式
+            )
+
+            for response in responses:
+                if response.status_code == 200:
+                    content = response.output.choices[0].message.content
+                    if content:
+                        yield content
+                else:
+                    logger.error(f"Extraction Stream Error: {response.message}")
+                    
+        except Exception as e:
+            logger.error(f"Extraction Exception: {e}")
+            raise
+
+    # 兼容性别名
     async def call_multimodal_model(self, image_data: bytes, prompt: str) -> str:
-        """
-        调用多模态模型（content_analyzer 专用别名）
-        """
         return await self.call_vl_model(image_data=image_data, prompt=prompt)
     
-    async def get_embedding(
-        self,
-        text: str,
-        text_type: str = "query"
-    ) -> List[float]:
-        """
-        获取文本嵌入向量
-        
-        Args:
-            text: 输入文本
-            text_type: 文本类型（query/document）
-            
-        Returns:
-            List[float]: 嵌入向量
-        """
+    async def get_embedding(self, text: str, text_type: str = "query") -> List[float]:
         try:
             response = dashscope.TextEmbedding.call(
                 model=settings.ALIYUN_EMBEDDING_MODEL,
                 input=text,
                 text_type=text_type
             )
-            
             if response.status_code == 200:
-                embedding = response.output['embeddings'][0]['embedding']
-                logger.debug(f"获取嵌入向量成功，维度: {len(embedding)}")
-                return embedding
+                return response.output['embeddings'][0]['embedding']
             else:
-                logger.error(f"嵌入向量调用失败: {response.code}")
-                raise Exception(f"嵌入向量调用失败: {response.message}")
-                
+                raise Exception(f"Embedding Error: {response.message}")
         except Exception as e:
-            logger.error(f"嵌入向量调用异常: {str(e)}")
+            logger.error(f"Embedding Exception: {str(e)}")
             raise
     
-    async def batch_get_embeddings(
-        self,
-        texts: List[str],
-        text_type: str = "document"
-    ) -> List[List[float]]:
-        """
-        批量获取文本嵌入向量
-        
-        Args:
-            texts: 文本列表
-            text_type: 文本类型
-            
-        Returns:
-            List[List[float]]: 嵌入向量列表
-        """
+    async def batch_get_embeddings(self, texts: List[str], text_type: str = "document") -> List[List[float]]:
         embeddings = []
-        
-        # 批量处理，每批25条
         batch_size = 25
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i+batch_size]
-            
             try:
                 response = dashscope.TextEmbedding.call(
                     model=settings.ALIYUN_EMBEDDING_MODEL,
                     input=batch,
                     text_type=text_type
                 )
-                
                 if response.status_code == 200:
                     batch_embeddings = [emb['embedding'] for emb in response.output['embeddings']]
                     embeddings.extend(batch_embeddings)
-                    logger.debug(f"批量嵌入 {len(batch)} 条文本成功")
                 else:
-                    logger.error(f"批量嵌入失败: {response.code}")
-                    raise Exception(f"批量嵌入失败: {response.message}")
-                    
+                    raise Exception(f"Batch Embedding Error: {response.message}")
             except Exception as e:
-                logger.error(f"批量嵌入异常: {str(e)}")
+                logger.error(f"Batch Embedding Exception: {str(e)}")
                 raise
-        
         return embeddings
 
-
-# 全局单例
 llm_service = AliyunLLMService()
-

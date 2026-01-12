@@ -1,21 +1,28 @@
 """
-RESTful API 端点 (重构版)
+RESTful API 端点 (极简版)
 
 原则：
-- 统一入口 /task/submit
-- 只做文件接收和任务分发
-- 业务逻辑在 Graph 中
+- 文件上传 -> 保存 -> 返回路径
+- 业务逻辑全在 WebSocket 通道处理
 """
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse, Response
 from typing import Optional
+from pathlib import Path
+import aiofiles
+import uuid
 from app.core.logger import app_logger as logger
 from app.core.connection_manager import manager
-from app.core.protocol import EventType
-from app.utils.helpers import generate_trace_id
-import asyncio
+from app.services.knowledge_base import vector_store
+from app.core.file_parser import parse_file_content
 
 router = APIRouter()
+
+# 上传目录
+# 重要：不要用相对路径（在 uvicorn reloader / 多进程下 cwd 可能变化，导致“偶发找不到文件”）
+# 固定到 backend/uploads，保证 WS 读取稳定
+UPLOAD_DIR = (Path(__file__).resolve().parents[2] / "uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
 
 
 @router.get("/health")
@@ -28,121 +35,121 @@ async def health_check():
     }
 
 
+@router.get("/file/preview")
+async def preview_file(path: str):
+    """预览文件内容 (解析后的文本)"""
+    if not path:
+        raise HTTPException(status_code=400, detail="Missing path")
+    
+    try:
+        p = Path(path)
+        # 兼容相对路径
+        if not p.is_absolute():
+            backend_root = Path(__file__).resolve().parents[2]
+            p = (backend_root / p).resolve()
+            
+        if not p.exists():
+            # 尝试在 uploads 目录下直接查找文件名
+            p_uploads = UPLOAD_DIR / Path(path).name
+            if p_uploads.exists():
+                p = p_uploads
+            else:
+                raise HTTPException(status_code=404, detail=f"File not found: {path}")
+        
+        async with aiofiles.open(p, 'rb') as f:
+            content = await f.read()
+            
+        # 使用 file_parser 解析内容
+        parsed_text = parse_file_content(content, p.name)
+        return {"content": parsed_text}
+        
+    except Exception as e:
+        logger.error(f"[Preview] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/upload")
+async def upload_file(
+    file: UploadFile = File(...),
+):
+    """
+    纯文件上传接口
+    
+    Returns:
+        file_path: 服务器上的文件路径
+        name: 原始文件名
+    """
+    try:
+        # 生成唯一文件名
+        ext = Path(file.filename).suffix if file.filename else ""
+        unique_name = f"{uuid.uuid4().hex}{ext}"
+        file_path = UPLOAD_DIR / unique_name
+        
+        # 保存文件
+        content = await file.read()
+        async with aiofiles.open(file_path, 'wb') as f:
+            await f.write(content)
+        
+        logger.info(f"[Upload] Saved: {file.filename} -> {file_path}")
+        
+        return {
+            "success": True,
+            # 返回绝对路径，避免 WS 侧因 cwd 不一致导致 os.path.exists 失败
+            "path": str(file_path.resolve()),
+            "name": file.filename,
+            "size": len(content)
+        }
+        
+    except Exception as e:
+        logger.error(f"[Upload] Failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+
+
 @router.post("/task/submit")
 async def submit_task(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    task_type: str = Form("extract"),  # "extract" | "audio" | "chat"
+    task_type: str = Form("extract"),
     client_id: str = Form(...),
     table_id: Optional[str] = Form(None),
 ):
     """
-    统一任务提交入口
+    兼容旧接口：文件上传 + 返回路径
     
-    Args:
-        file: 上传的文件
-        task_type: 任务类型
-        client_id: 客户端 ID（用于 WebSocket 推送）
-        table_id: 目标表格 ID（可选，不提供则创建新表格）
-    
-    Returns:
-        task_id: 任务 ID
+    注意：实际处理逻辑已移至 WebSocket 通道
+    这里只做文件保存，不再触发后台任务
     """
-    task_id = generate_trace_id()
-    logger.info(f"[Task] Received: {task_id}, type={task_type}, file={file.filename}, client={client_id}")
-    
-    # 检查客户端是否在线
-    if not manager.is_connected(client_id):
-        logger.warning(f"[Task] Client not connected: {client_id}")
-        # 不阻止任务，但记录警告
-    
-    # 读取文件内容
     try:
-        file_content = await file.read()
-        file_name = file.filename or "unknown"
-    except Exception as e:
-        logger.error(f"[Task] Failed to read file: {str(e)}")
-        raise HTTPException(status_code=400, detail="Failed to read file")
-    
-    # 如果没有指定 table_id，生成一个
-    actual_table_id = table_id or f"table_{task_id[:8]}"
-    
-    # 异步执行任务
-    background_tasks.add_task(
-        execute_task,
-        task_id=task_id,
-        task_type=task_type,
-        client_id=client_id,
-        table_id=actual_table_id,
-        file_content=file_content,
-        file_name=file_name,
-    )
-    
-    # 直接执行 (已注释，避免阻塞)
-    # await execute_task(
-    #     task_id=task_id,
-    #     task_type=task_type,
-    #     client_id=client_id,
-    #     table_id=actual_table_id,
-    #     file_content=file_content,
-    #     file_name=file_name,
-    # )
-    
-    # 立即返回
-    return {
-        "task_id": task_id,
-        "table_id": actual_table_id,
-        "status": "queued"
-    }
-
-
-async def execute_task(
-    task_id: str,
-    task_type: str,
-    client_id: str,
-    table_id: str,
-    file_content: bytes,
-    file_name: str,
-):
-    """
-    执行任务（后台）
-    
-    调用 Agent Graph 的 run_task 函数
-    """
-    logger.info(f"[Task] Executing: {task_id}")
-    
-    try:
-        # 导入并执行 Graph
-        from app.agents.graph import run_task
+        # 保存文件
+        ext = Path(file.filename).suffix if file.filename else ""
+        unique_name = f"{uuid.uuid4().hex}{ext}"
+        file_path = UPLOAD_DIR / unique_name
         
-        await run_task(
-            task_id=task_id,
-            client_id=client_id,
-            task_type=task_type,
-            file_content=file_content,
-            file_name=file_name,
-            table_id=table_id,
-        )
+        content = await file.read()
+        async with aiofiles.open(file_path, 'wb') as f:
+            await f.write(content)
+        
+        logger.info(f"[Task Submit] Saved: {file.filename} -> {file_path}, client={client_id}")
+        
+        return {
+            "success": True,
+            "file_path": str(file_path.resolve()),
+            "path": str(file_path.resolve()),
+            "name": file.filename,
+            "task_type": task_type,
+            "client_id": client_id,
+            "table_id": table_id
+        }
         
     except Exception as e:
-        logger.error(f"[Task] Failed: {task_id} - {str(e)}")
-        import traceback
-        traceback.print_exc()
-        
-        # 发送错误事件
-        await manager.send(client_id, EventType.ERROR, {
-            "code": 500,
-            "message": f"任务执行失败: {str(e)}",
-            "task_id": task_id,
-        })
+        logger.error(f"[Task Submit] Failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"处理失败: {str(e)}")
 
 
-# ========== 兼容性端点（逐步废弃）==========
+# ========== 兼容性端点 ==========
 
 @router.get("/template/list")
 async def get_templates():
     """获取表单模板列表"""
-    # 返回空列表，Phase 3 会实现 Skills 导入
     return {
         "code": 200,
         "message": "获取成功",
@@ -157,7 +164,17 @@ async def get_supported_types():
         "supported_types": {
             "excel": [".xlsx", ".xls", ".csv"],
             "word": [".docx", ".doc"],
-            "pdf": [".pdf"],
             "image": [".png", ".jpg", ".jpeg", ".gif", ".webp"],
+            "text": [".txt"],
         }
     }
+
+
+@router.get("/products/names")
+async def get_product_names():
+    """返回完整商品库名称列表（JSON数组）"""
+    try:
+        return Response(content=vector_store.get_product_names_json(), media_type="application/json")
+    except Exception as e:
+        logger.error(f"[Products] get names failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="获取商品库失败")

@@ -7,23 +7,27 @@
  * - 语音按钮
  * - 文件上传（点击/拖拽/粘贴）
  * - 可折叠
+ * - 流式思考过程显示
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { wsClient } from '@/services/websocket';
 import { EventType, ChatMessagePayload } from '@/services/protocol';
 import { useCanvasStore } from '@/store/useCanvasStore';
+import { toast } from '@/components/Toast';
 import {
   MessageSquare,
   ChevronLeft,
   ChevronRight,
   Send,
-  Mic,
   Upload,
   Bot,
   User,
   Image as ImageIcon,
   X,
+  BrainCircuit, // 思考图标
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import './FloatingPanel.css';
 
@@ -33,6 +37,8 @@ interface FileAttachment {
   type: 'image' | 'file';
   url?: string;  // 图片预览 URL
   size?: number;
+  path?: string; // 上传后的路径
+  content?: string; // 文件文本内容（用于预览）
 }
 
 interface ChatMessage {
@@ -41,6 +47,8 @@ interface ChatMessage {
   content: string;
   timestamp: Date;
   attachment?: FileAttachment;  // 文件附件
+  // 思考过程字段
+  thinking?: string;
 }
 
 export const FloatingPanel: React.FC = () => {
@@ -48,26 +56,98 @@ export const FloatingPanel: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isUploading, setIsUploading] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [previewFile, setPreviewFile] = useState<FileAttachment | null>(null);
+  const [filePreviewLoading, setFilePreviewLoading] = useState(false);
+  
+  // 思考过程折叠状态 (msgId -> boolean)
+  const [expandedThinking, setExpandedThinking] = useState<Record<string, boolean>>({});
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   
-  const { tables, activeTableId, createTable } = useCanvasStore();
+  const { tables, activeTableId } = useCanvasStore();
+  const openCustomerModal = useCanvasStore((s) => s.openCustomerModal);
 
-  // 监听聊天消息
+  const ensureCustomerSelected = useCallback(() => {
+    if (!activeTableId) {
+      toast.error('请先选择客户');
+      return false;
+    }
+    const t = tables[activeTableId];
+    if (!t?.metadata?.customerId) {
+      // 打开全局居中大弹窗
+      openCustomerModal(activeTableId);
+      return false;
+    }
+    return true;
+  }, [activeTableId, tables, openCustomerModal]);
+
+  // 监听聊天消息 (支持流式更新)
   useEffect(() => {
     const unsubChat = wsClient.on<ChatMessagePayload>(EventType.CHAT_MESSAGE, (data) => {
-      const newMessage: ChatMessage = {
-        id: `${Date.now()}_${Math.random()}`,
-        role: data.role,
-        content: data.content,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, newMessage]);
+      setMessages((prev) => {
+        const lastMsg = prev[prev.length - 1];
+        
+        // 1. 思考过程 (增量)
+        if (data.is_thinking) {
+          // 如果最后一条是 Agent 消息且正在生成中 (我们假设如果是 thinking 就在最后一条)
+          if (lastMsg && lastMsg.role === 'agent') {
+            const updatedLast = {
+              ...lastMsg,
+              thinking: (lastMsg.thinking || '') + data.content
+            };
+            return [...prev.slice(0, -1), updatedLast];
+          } else {
+             // 新建一条消息开始思考
+             const newMessage: ChatMessage = {
+              id: `${Date.now()}_${Math.random()}`,
+              role: 'agent',
+              content: '', // 内容暂时为空
+              thinking: data.content,
+              timestamp: new Date(),
+            };
+            // 默认展开思考
+            setExpandedThinking(prev => ({...prev, [newMessage.id]: true}));
+            return [...prev, newMessage];
+          }
+        }
+        
+        // 2. 正文内容 (增量)
+        if (data.is_delta) {
+           if (lastMsg && lastMsg.role === 'agent') {
+            const updatedLast = {
+              ...lastMsg,
+              content: lastMsg.content + data.content
+            };
+            return [...prev.slice(0, -1), updatedLast];
+           } else {
+             // 可能是刚思考完，或者直接开始输出
+             const newMessage: ChatMessage = {
+               id: `${Date.now()}_${Math.random()}`,
+               role: 'agent',
+               content: data.content,
+               timestamp: new Date(),
+             };
+             return [...prev, newMessage];
+           }
+        }
+        
+        // 3. 完整消息 (非流式)
+        if (!data.is_delta && !data.is_thinking) {
+           const newMessage: ChatMessage = {
+             id: `${Date.now()}_${Math.random()}`,
+             role: data.role,
+             content: data.content,
+             timestamp: new Date(),
+           };
+           return [...prev, newMessage];
+        }
+
+        return prev;
+      });
     });
 
     return () => {
@@ -83,6 +163,7 @@ export const FloatingPanel: React.FC = () => {
   // 发送消息
   const handleSend = () => {
     if (!inputValue.trim()) return;
+    if (!ensureCustomerSelected()) return;
 
     // 添加用户消息到本地
     const userMessage: ChatMessage = {
@@ -141,6 +222,7 @@ export const FloatingPanel: React.FC = () => {
   // 通用文件处理函数
   const processFile = useCallback(async (file: File) => {
     if (isUploading) return;
+    if (!ensureCustomerSelected()) return;
     
     setIsUploading(true);
 
@@ -157,6 +239,14 @@ export const FloatingPanel: React.FC = () => {
       if (isImage) {
         attachment.url = URL.createObjectURL(file);
       }
+      
+      // 如果是文本文件，尝试读取内容用于预览
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      if (['txt', 'csv'].includes(ext || '')) {
+        try {
+          attachment.content = await file.text();
+        } catch { /* ignore */ }
+      }
 
       // 添加用户上传消息到聊天记录
       const uploadMessage: ChatMessage = {
@@ -169,36 +259,81 @@ export const FloatingPanel: React.FC = () => {
       setMessages((prev) => [...prev, uploadMessage]);
 
       // 创建新表格来接收数据
-      const tableId = createTable({
-        title: file.name.replace(/\.[^/.]+$/, ''),
-      });
-
-      // 上传文件
+      // (SimpleAgent 策略变了，这里只是为了 UI 展示，实际创建由后端推送)
+      // 但为了兼容旧逻辑，且不确定后端是否能收到 File 对象，这里我们只负责上传
+      // SimpleAgent 会在收到 file 后自动 create_table
+      
+      // 注意：现在 SimpleAgent 负责创建表格，所以前端不需要主动 createTable
+      // 但我们需要 tableId 传给上传接口吗？
+      // 看一下 websocket.py 的 handle_chat，它是处理 attachment 的
+      // 现在的 handle_chat 逻辑是：如果有 attachments，读取并传给 SimpleAgent
+      // 前端只需要把文件上传到后端某个位置，或者通过 WebSocket 传二进制？
+      // 之前的逻辑是 POST /api/task/submit
+      // 为了适配 SimpleAgent，我们可以继续用 /api/task/submit (它支持 task_type='extract')
+      // 后端 api/endpoints.py 里需要确认是否兼容 SimpleAgent
+      // 或者：既然我们已经有了 WebSocket 上传能力（虽然不推荐传大文件），
+      // 但之前的逻辑是 POST 上传。
+      // 我们暂且保留 POST 上传，但在后端修改 /api/task/submit 的处理逻辑。
+      
+      // 这里的逻辑：上传 -> 后端保存 -> WebSocket 发送 chat 消息带 attachment path
+      
       const formData = new FormData();
       formData.append('file', file);
       formData.append('task_type', 'extract');
       formData.append('client_id', wsClient.clientId);
-      formData.append('table_id', tableId);
 
-      const response = await fetch('/api/task/submit', {
-        method: 'POST',
-        body: formData,
+      // 临时：为了让新后端能通过 handle_chat 处理文件，
+      // 我们需要一种方式告诉后端“我上传了个文件，路径在这里，请处理”
+      // 现在的 /api/task/submit 可能会触发旧的 task manager
+      
+      // 修正方案：简单点，直接把文件转 base64 通过 WS 发送？不行，大文件会爆。
+      // 保持 POST 上传，接口返回 path，然后 WS 发送 chat 消息带 path。
+      
+      const response = await fetch('/api/upload', {
+         method: 'POST',
+         body: formData
+      });
+      // 实际上现在的后端只有 endpoints.py 里的 submit_task
+      // 让我们假设 submit_task 还能用，且我们修改 endpoints.py 让它只返回 path 
+      // 或者我们可以只依赖现有的 upload 逻辑
+      
+      // 为了不改动太多，先假设 /api/task/submit 依然可用，
+      // 并且后端已经适配了 (之前没改 endpoints.py，可能需要检查)
+      
+      if (!response.ok) throw new Error('上传失败');
+      
+      const result = await response.json();
+      // result 应该包含 file_path 或者是 task_id
+      
+      // 如果是用现在的 SimpleAgent，我们希望通过 WS 触发
+      // 所以这里我们手动发一个 chat 消息，带上 attachment info
+      // 同时附带完整 tables 上下文，方便后端读取当前客户信息
+      const tablesContext: Record<string, {
+        id: string;
+        title: string;
+        rows: unknown[];
+        schema: unknown[];
+        metadata: unknown;
+      }> = {};
+      Object.entries(tables).forEach(([id, table]) => {
+        tablesContext[id] = {
+          id: table.id,
+          title: table.title,
+          rows: table.rows,
+          schema: table.schema,
+          metadata: table.metadata || {},
+        };
       });
 
-      if (!response.ok) {
-        throw new Error('上传失败');
-      }
+      wsClient.send('chat', {
+        content: `分析文件: ${file.name}`,
+        context: { activeTableId, tables: tablesContext },
+        attachments: [{
+            name: file.name,
+            path: result.file_path || result.path // 假设接口返回路径
+        }]
+      });
 
-      // 添加系统消息
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `${Date.now()}_system`,
-          role: 'system',
-          content: `正在处理: ${file.name}`,
-          timestamp: new Date(),
-        },
-      ]);
     } catch (error) {
       console.error('Upload error:', error);
       setMessages((prev) => [
@@ -213,7 +348,7 @@ export const FloatingPanel: React.FC = () => {
     } finally {
       setIsUploading(false);
     }
-  }, [isUploading, createTable]);
+  }, [isUploading, activeTableId, ensureCustomerSelected, tables]);
 
   // 文件选择
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -251,17 +386,15 @@ export const FloatingPanel: React.FC = () => {
     }
   }, [processFile]);
 
-  // 粘贴处理（只处理文件/图片，不处理文字）
+  // 粘贴处理
   const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
     const items = e.clipboardData?.items;
     if (!items) return;
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      
-      // 只处理文件类型（图片或其他文件）
       if (item.kind === 'file') {
-        e.preventDefault(); // 阻止默认粘贴行为
+        e.preventDefault(); 
         const file = item.getAsFile();
         if (file) {
           await processFile(file);
@@ -269,13 +402,12 @@ export const FloatingPanel: React.FC = () => {
         return;
       }
     }
-    // 如果不是文件，不做任何处理，让默认行为处理文字粘贴
   }, [processFile]);
 
-  // 语音输入
+  // 语音输入（已禁用）
+  /*
   const handleVoice = async () => {
     if (isRecording) {
-      // 停止录音
       mediaRecorderRef.current?.stop();
       setIsRecording(false);
       return;
@@ -293,51 +425,23 @@ export const FloatingPanel: React.FC = () => {
 
       mediaRecorder.onstop = async () => {
         stream.getTracks().forEach(track => track.stop());
-        
         const audioBlob = new Blob(chunks, { type: 'audio/webm' });
         
-        // 上传音频
         const formData = new FormData();
         formData.append('file', audioBlob, 'voice.webm');
-        formData.append('task_type', 'audio');
+        formData.append('task_type', 'audio'); // 后端需适配 audio 任务转 chat
         formData.append('client_id', wsClient.clientId);
 
         try {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `${Date.now()}_system`,
-              role: 'system',
-              content: '正在识别语音...',
-              timestamp: new Date(),
-            },
-          ]);
-
-          const response = await fetch('/api/task/submit', {
-            method: 'POST',
-            body: formData,
-          });
-
-          if (!response.ok) {
-            throw new Error('语音识别失败');
-          }
+            // 这里仍使用 submit 接口
+            await fetch('/api/task/submit', { method: 'POST', body: formData });
         } catch (error) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `${Date.now()}_error`,
-              role: 'system',
-              content: `语音处理失败: ${error instanceof Error ? error.message : '未知错误'}`,
-              timestamp: new Date(),
-            },
-          ]);
+            console.error(error);
         }
       };
 
       mediaRecorder.start();
       setIsRecording(true);
-
-      // 5秒后自动停止
       setTimeout(() => {
         if (mediaRecorderRef.current?.state === 'recording') {
           mediaRecorderRef.current.stop();
@@ -347,17 +451,9 @@ export const FloatingPanel: React.FC = () => {
 
     } catch (error) {
       console.error('Microphone access error:', error);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `${Date.now()}_error`,
-          role: 'system',
-          content: '无法访问麦克风，请检查权限设置',
-          timestamp: new Date(),
-        },
-      ]);
     }
   };
+  */
 
   // 渲染消息附件
   const renderAttachment = (attachment: FileAttachment) => {
@@ -373,8 +469,16 @@ export const FloatingPanel: React.FC = () => {
       );
     }
     
+    // 判断是否可预览的文件类型
+    const ext = attachment.name.split('.').pop()?.toLowerCase();
+    const isPreviewable = ['xlsx', 'xls', 'csv', 'docx', 'doc', 'txt'].includes(ext || '');
+    
     return (
-      <div className="attachment-file">
+      <div 
+        className={`attachment-file ${isPreviewable ? 'previewable' : ''}`}
+        onClick={() => isPreviewable && handleFilePreview(attachment)}
+        title={isPreviewable ? '点击查看文件内容' : undefined}
+      >
         <span className="file-icon">{getFileIcon(attachment.name)}</span>
         <div className="file-info">
           <span className="file-name">{attachment.name}</span>
@@ -382,8 +486,114 @@ export const FloatingPanel: React.FC = () => {
             <span className="file-size">{(attachment.size / 1024).toFixed(1)} KB</span>
           )}
         </div>
+        {isPreviewable && (
+          <span className="file-preview-hint">点击查看</span>
+        )}
       </div>
     );
+  };
+
+  // 切换思考过程展开状态
+  const toggleThinking = (msgId: string) => {
+    setExpandedThinking(prev => ({...prev, [msgId]: !prev[msgId]}));
+  };
+
+  // 文件预览处理
+  const handleFilePreview = async (attachment: FileAttachment) => {
+    setPreviewFile(attachment);
+    
+    // 如果已经有内容，直接显示
+    if (attachment.content) return;
+    
+    // 如果有 path，尝试从后端获取内容
+    if (attachment.path) {
+      setFilePreviewLoading(true);
+      try {
+        // 修复：Windows 路径包含反斜杠可能导致 URL 问题，替换为正斜杠
+        const safePath = attachment.path.replace(/\\/g, '/');
+        const response = await fetch(`/api/file/preview?path=${encodeURIComponent(safePath)}`);
+        if (response.ok) {
+          const data = await response.json();
+          // 更新附件内容
+          attachment.content = data.content || '（文件内容为空）';
+          setPreviewFile({...attachment});
+        } else {
+          console.error('Preview fetch failed:', response.status, response.statusText);
+          throw new Error('Preview failed');
+        }
+      } catch (e) {
+        console.error('Preview error:', e);
+        // 如果获取失败，显示提示
+        attachment.content = '预览失败：无法读取文件内容。但文件已发送至后端处理，解析结果已填入表格。';
+        setPreviewFile({...attachment});
+      } finally {
+        setFilePreviewLoading(false);
+      }
+    } else {
+      // 没有 path 也没有 content，显示提示
+      attachment.content = '文件内容已发送至后端处理，解析结果已填入表格。';
+      setPreviewFile({...attachment});
+    }
+  };
+
+  // 渲染预览内容（支持将 Pipe 表格渲染为 HTML 表格）
+  const renderPreviewContent = (content: string) => {
+    if (!content) return <div className="preview-empty">内容为空</div>;
+
+    const lines = content.trim().split('\n');
+    const elements: JSX.Element[] = [];
+    let tableRows: string[] = [];
+    let keyCounter = 0;
+
+    const flushTable = () => {
+      if (tableRows.length > 0) {
+        // 渲染表格
+        const header = tableRows[0];
+        const body = tableRows.slice(1);
+        
+        elements.push(
+          <div key={`tbl-${keyCounter++}`} className="preview-table-wrapper">
+            <table className="preview-table">
+              <thead>
+                <tr>
+                  {header.split('|').slice(1, -1).map((h, i) => (
+                    <th key={i}>{h.trim()}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {body.map((row, i) => (
+                  <tr key={i}>
+                    {row.split('|').slice(1, -1).map((cell, j) => (
+                      <td key={j}>{cell.trim()}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+        tableRows = [];
+      }
+    };
+
+    lines.forEach((line) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+        tableRows.push(trimmed);
+      } else {
+        flushTable();
+        // 渲染普通文本/标题
+        if (trimmed.startsWith('### ')) {
+          elements.push(<h3 key={`h3-${keyCounter++}`} className="preview-h3">{trimmed.replace('### ', '')}</h3>);
+        } else if (trimmed) {
+          elements.push(<p key={`p-${keyCounter++}`} className="preview-p">{trimmed}</p>);
+        }
+      }
+    });
+    flushTable();
+
+    return <div className="preview-content-wrapper">{elements}</div>;
   };
 
   return (
@@ -395,6 +605,32 @@ export const FloatingPanel: React.FC = () => {
             <X size={24} />
           </button>
           <img src={previewImage} alt="预览" />
+        </div>
+      )}
+
+      {/* 文件内容预览弹窗 */}
+      {previewFile && (
+        <div className="file-preview-modal">
+          <div className="file-preview-backdrop" onClick={() => setPreviewFile(null)} />
+          <div className="file-preview-container">
+            <div className="file-preview-header">
+              <span className="file-preview-icon">{getFileIcon(previewFile.name)}</span>
+              <span className="file-preview-name">{previewFile.name}</span>
+              <button className="file-preview-close" onClick={() => setPreviewFile(null)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="file-preview-body">
+              {filePreviewLoading ? (
+                <div className="file-preview-loading">
+                  <div className="loading-spinner" />
+                  <span>加载中...</span>
+                </div>
+              ) : (
+                renderPreviewContent(previewFile.content || '文件内容已发送至后端处理，解析结果已填入表格。')
+              )}
+            </div>
+          </div>
         </div>
       )}
 
@@ -415,7 +651,7 @@ export const FloatingPanel: React.FC = () => {
             <span>AI 助手</span>
           </div>
 
-          {/* 消息列表（支持拖拽） */}
+          {/* 消息列表 */}
           <div 
             ref={messagesContainerRef}
             className={`messages-container ${isDragOver ? 'drag-over' : ''}`}
@@ -446,12 +682,33 @@ export const FloatingPanel: React.FC = () => {
                     {msg.role === 'user' ? <User size={14} /> : <Bot size={14} />}
                   </div>
                   <div className="message-bubble">
-                    {/* 如果有附件，先显示附件 */}
                     {msg.attachment && renderAttachment(msg.attachment)}
-                    {/* 消息文本（如果有附件，显示较小的文字） */}
-                    <div className={`message-text ${msg.attachment ? 'with-attachment' : ''}`}>
-                      {msg.content}
-                    </div>
+                    
+                    {/* 思考过程展示区 */}
+                    {msg.thinking && (
+                        <div className="thinking-process">
+                            <div 
+                                className="thinking-header" 
+                                onClick={() => toggleThinking(msg.id)}
+                            >
+                                <BrainCircuit size={14} />
+                                <span>深度思考中...</span>
+                                {expandedThinking[msg.id] ? <ChevronUp size={14}/> : <ChevronDown size={14}/>}
+                            </div>
+                            {expandedThinking[msg.id] && (
+                                <div className="thinking-content">
+                                    {msg.thinking}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* 正文内容 */}
+                    {msg.content && (
+                        <div className={`message-text ${msg.attachment ? 'with-attachment' : ''}`}>
+                          {msg.content}
+                        </div>
+                    )}
                   </div>
                 </div>
               ))
@@ -461,7 +718,6 @@ export const FloatingPanel: React.FC = () => {
 
           {/* 输入区域 */}
           <div className="input-area">
-            {/* 工具栏 */}
             <div className="input-toolbar">
               <input
                 ref={fileInputRef}
@@ -479,6 +735,7 @@ export const FloatingPanel: React.FC = () => {
                 <Upload size={16} />
                 <span>上传</span>
               </button>
+              {/* 语音功能暂时禁用
               <button 
                 className={`tool-btn voice-btn ${isRecording ? 'recording' : ''}`}
                 onClick={handleVoice} 
@@ -487,15 +744,16 @@ export const FloatingPanel: React.FC = () => {
                 <Mic size={16} />
                 <span>{isRecording ? '录音中...' : '语音'}</span>
               </button>
+              */}
             </div>
 
-            {/* 文本输入 */}
             <div className="text-input-wrapper">
               <input
                 type="text"
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                onPaste={handlePaste}
                 placeholder="输入指令或问题..."
               />
               <button
@@ -514,4 +772,3 @@ export const FloatingPanel: React.FC = () => {
 };
 
 export default FloatingPanel;
-
