@@ -322,8 +322,8 @@
 }
 
 .message.user .attachment-file {
-  background: rgba(255, 255, 255, 0.15);
-  border-color: rgba(255, 255, 255, 0.3);
+  background: white;
+  border-color: #e2e8f0;
 }
 
 .attachment-file .file-icon {
@@ -675,4 +675,145 @@
   background: #f1f5f9 !important; /* hover 变深一点 */
   border-color: #3b82f6;
   box-shadow: 0 2px 8px rgba(59, 130, 246, 0.15);
+}
+
+/* ============ Markdown 渲染样式 ============ */
+.markdown-content {
+  line-height: 1.6;
+}
+
+.markdown-content p,
+.markdown-content .md-paragraph {
+  margin: 0 0 8px 0;
+}
+
+.markdown-content .md-paragraph:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content .md-h2 {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 12px 0 8px 0;
+  color: #1e293b;
+}
+
+.markdown-content .md-h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 10px 0 6px 0;
+  color: #334155;
+}
+
+.markdown-content .md-h4 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 8px 0 4px 0;
+  color: #475569;
+}
+
+.markdown-content .md-list-item {
+  display: flex;
+  gap: 8px;
+  margin: 4px 0;
+  align-items: flex-start;
+}
+
+.markdown-content .md-bullet {
+  color: #3b82f6;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.markdown-content .md-number {
+  color: #3b82f6;
+  font-weight: 600;
+  flex-shrink: 0;
+  min-width: 20px;
+}
+
+.markdown-content .inline-code {
+  background: rgba(59, 130, 246, 0.1);
+  color: #2563eb;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+}
+
+.markdown-content .code-block {
+  background: #1e293b;
+  color: #e2e8f0;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin: 8px 0;
+  overflow-x: auto;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.markdown-content .code-block code {
+  background: transparent;
+  padding: 0;
+}
+
+.markdown-content strong {
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.markdown-content em {
+  font-style: italic;
+  color: #475569;
+}
+
+/* ============ 加载动画样式 ============ */
+.loading-message {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px !important;
+}
+
+.loading-dots {
+  display: flex;
+  gap: 4px;
+}
+
+.loading-dots span {
+  width: 8px;
+  height: 8px;
+  background: #3b82f6;
+  border-radius: 50%;
+  animation: loadingBounce 1.4s ease-in-out infinite both;
+}
+
+.loading-dots span:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.loading-dots span:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+.loading-dots span:nth-child(3) {
+  animation-delay: 0s;
+}
+
+@keyframes loadingBounce {
+  0%, 80%, 100% {
+    transform: scale(0.6);
+    opacity: 0.5;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.loading-text {
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
 }

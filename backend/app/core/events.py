@@ -12,7 +12,7 @@ async def startup_event(app: FastAPI):
     应用启动时执行
     """
     logger.info("=" * 60)
-    logger.info("智能表单助手后端系统启动中...")
+    logger.info("智能订单助手后端系统启动中...")
     logger.info("=" * 60)
     
     try:
@@ -51,7 +51,7 @@ async def shutdown_event(app: FastAPI):
     应用关闭时执行
     """
     logger.info("=" * 60)
-    logger.info("智能表单助手后端系统关闭中...")
+    logger.info("智能订单助手后端系统关闭中...")
     logger.info("=" * 60)
     
     # 清理资源

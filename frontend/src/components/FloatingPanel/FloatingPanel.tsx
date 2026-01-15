@@ -31,6 +31,121 @@ import {
 } from 'lucide-react';
 import './FloatingPanel.css';
 
+// 简单的 Markdown 渲染函数
+const renderMarkdown = (text: string): React.ReactNode => {
+  if (!text) return null;
+  
+  // 分割成行处理
+  const lines = text.split('\n');
+  const elements: React.ReactNode[] = [];
+  let keyCounter = 0;
+  let inCodeBlock = false;
+  let codeBlockContent: string[] = [];
+
+  const processInlineMarkdown = (line: string): React.ReactNode => {
+    // 简化处理：逐个替换
+    let processed = line;
+    
+    // 粗体
+    processed = processed.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    // 斜体
+    processed = processed.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    // 行内代码
+    processed = processed.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+    
+    // 使用 dangerouslySetInnerHTML 渲染（简化方案）
+    return <span key={`span-${keyCounter++}`} dangerouslySetInnerHTML={{ __html: processed }} />;
+  };
+
+  lines.forEach((line) => {
+    // 代码块处理
+    if (line.startsWith('```')) {
+      if (!inCodeBlock) {
+        inCodeBlock = true;
+        codeBlockContent = [];
+      } else {
+        // 结束代码块
+        elements.push(
+          <pre key={`code-${keyCounter++}`} className="code-block">
+            <code>{codeBlockContent.join('\n')}</code>
+          </pre>
+        );
+        inCodeBlock = false;
+        codeBlockContent = [];
+      }
+      return;
+    }
+
+    if (inCodeBlock) {
+      codeBlockContent.push(line);
+      return;
+    }
+
+    const trimmed = line.trim();
+    
+    // 空行
+    if (!trimmed) {
+      elements.push(<br key={`br-${keyCounter++}`} />);
+      return;
+    }
+
+    // 标题
+    if (trimmed.startsWith('### ')) {
+      elements.push(<h4 key={`h4-${keyCounter++}`} className="md-h4">{trimmed.slice(4)}</h4>);
+      return;
+    }
+    if (trimmed.startsWith('## ')) {
+      elements.push(<h3 key={`h3-${keyCounter++}`} className="md-h3">{trimmed.slice(3)}</h3>);
+      return;
+    }
+    if (trimmed.startsWith('# ')) {
+      elements.push(<h2 key={`h2-${keyCounter++}`} className="md-h2">{trimmed.slice(2)}</h2>);
+      return;
+    }
+
+    // 列表项
+    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+      elements.push(
+        <div key={`li-${keyCounter++}`} className="md-list-item">
+          <span className="md-bullet">•</span>
+          {processInlineMarkdown(trimmed.slice(2))}
+        </div>
+      );
+      return;
+    }
+
+    // 有序列表
+    const orderedMatch = trimmed.match(/^(\d+)\.\s+(.*)$/);
+    if (orderedMatch) {
+      elements.push(
+        <div key={`oli-${keyCounter++}`} className="md-list-item">
+          <span className="md-number">{orderedMatch[1]}.</span>
+          {processInlineMarkdown(orderedMatch[2])}
+        </div>
+      );
+      return;
+    }
+
+    // 普通段落
+    elements.push(
+      <p key={`p-${keyCounter++}`} className="md-paragraph">
+        {processInlineMarkdown(trimmed)}
+      </p>
+    );
+  });
+
+  // 处理未关闭的代码块
+  if (inCodeBlock && codeBlockContent.length > 0) {
+    elements.push(
+      <pre key={`code-${keyCounter++}`} className="code-block">
+        <code>{codeBlockContent.join('\n')}</code>
+      </pre>
+    );
+  }
+
+  return <div className="markdown-content">{elements}</div>;
+};
+
 // 文件附件类型
 interface FileAttachment {
   name: string;
@@ -89,7 +204,9 @@ export const FloatingPanel: React.FC = () => {
   useEffect(() => {
     const unsubChat = wsClient.on<ChatMessagePayload>(EventType.CHAT_MESSAGE, (data) => {
       setMessages((prev) => {
-        const lastMsg = prev[prev.length - 1];
+        // 先移除所有加载消息 (__LOADING__)
+        let filtered = prev.filter(m => m.content !== '__LOADING__');
+        const lastMsg = filtered[filtered.length - 1];
         
         // 1. 思考过程 (增量)
         if (data.is_thinking) {
@@ -99,7 +216,7 @@ export const FloatingPanel: React.FC = () => {
               ...lastMsg,
               thinking: (lastMsg.thinking || '') + data.content
             };
-            return [...prev.slice(0, -1), updatedLast];
+            return [...filtered.slice(0, -1), updatedLast];
           } else {
              // 新建一条消息开始思考
              const newMessage: ChatMessage = {
@@ -111,7 +228,7 @@ export const FloatingPanel: React.FC = () => {
             };
             // 默认展开思考
             setExpandedThinking(prev => ({...prev, [newMessage.id]: true}));
-            return [...prev, newMessage];
+            return [...filtered, newMessage];
           }
         }
         
@@ -122,7 +239,7 @@ export const FloatingPanel: React.FC = () => {
               ...lastMsg,
               content: lastMsg.content + data.content
             };
-            return [...prev.slice(0, -1), updatedLast];
+            return [...filtered.slice(0, -1), updatedLast];
            } else {
              // 可能是刚思考完，或者直接开始输出
              const newMessage: ChatMessage = {
@@ -131,7 +248,7 @@ export const FloatingPanel: React.FC = () => {
                content: data.content,
                timestamp: new Date(),
              };
-             return [...prev, newMessage];
+             return [...filtered, newMessage];
            }
         }
         
@@ -143,10 +260,10 @@ export const FloatingPanel: React.FC = () => {
              content: data.content,
              timestamp: new Date(),
            };
-           return [...prev, newMessage];
+           return [...filtered, newMessage];
         }
 
-        return prev;
+        return filtered;
       });
     });
 
@@ -163,7 +280,8 @@ export const FloatingPanel: React.FC = () => {
   // 发送消息
   const handleSend = () => {
     if (!inputValue.trim()) return;
-    if (!ensureCustomerSelected()) return;
+    // 移除全局客户选择限制
+    // if (!ensureCustomerSelected()) return;
 
     // 添加用户消息到本地
     const userMessage: ChatMessage = {
@@ -222,7 +340,8 @@ export const FloatingPanel: React.FC = () => {
   // 通用文件处理函数
   const processFile = useCallback(async (file: File) => {
     if (isUploading) return;
-    if (!ensureCustomerSelected()) return;
+    // 移除全局客户选择限制
+    // if (!ensureCustomerSelected()) return;
     
     setIsUploading(true);
 
@@ -257,6 +376,15 @@ export const FloatingPanel: React.FC = () => {
         attachment,
       };
       setMessages((prev) => [...prev, uploadMessage]);
+
+      // 添加一个"处理中"的加载消息
+      const loadingMsgId = `${Date.now()}_loading`;
+      setMessages((prev) => [...prev, {
+        id: loadingMsgId,
+        role: 'agent',
+        content: '__LOADING__', // 特殊标记，用于显示加载动画
+        timestamp: new Date(),
+      }]);
 
       // 创建新表格来接收数据
       // (SimpleAgent 策略变了，这里只是为了 UI 展示，实际创建由后端推送)
@@ -703,10 +831,22 @@ export const FloatingPanel: React.FC = () => {
                         </div>
                     )}
 
-                    {/* 正文内容 */}
-                    {msg.content && (
+                    {/* 正文内容 (支持 Markdown 渲染) */}
+                    {msg.content && msg.content !== '__LOADING__' && (
                         <div className={`message-text ${msg.attachment ? 'with-attachment' : ''}`}>
-                          {msg.content}
+                          {msg.role === 'agent' ? renderMarkdown(msg.content) : msg.content}
+                        </div>
+                    )}
+                    
+                    {/* 加载动画 */}
+                    {msg.content === '__LOADING__' && (
+                        <div className="message-text loading-message">
+                          <div className="loading-dots">
+                            <span></span>
+                            <span></span>
+                            <span></span>
+                          </div>
+                          <span className="loading-text">正在分析文件...</span>
                         </div>
                     )}
                   </div>

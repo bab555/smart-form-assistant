@@ -14,6 +14,7 @@ from app.utils.helpers import generate_trace_id
 from app.core.simple_agent import SimpleAgent
 from app.services.knowledge_base import vector_store
 from app.services.preference_store import preference_store
+from app.services.remote_session import remote_session_manager
 
 router = APIRouter()
 agent = SimpleAgent()
@@ -21,12 +22,21 @@ agent = SimpleAgent()
 @router.websocket("/agent")
 async def websocket_endpoint(
     websocket: WebSocket,
-    client_id: Optional[str] = Query(None)
+    client_id: Optional[str] = Query(None),
+    token: Optional[str] = Query(None)
 ):
     # generate_trace_id() 以 "trace_20..." 开头，切前8位会导致 id 冲突；取最后的随机段
     trace_suffix = generate_trace_id().split("_")[-1]
     actual_client_id = client_id or f"client_{trace_suffix}"
     
+    # 获取用户 ID（如果已登录）
+    user_id = "anonymous"
+    if token:
+        session = remote_session_manager.get_session(token)
+        if session:
+            user_id = session.user_id
+            logger.info(f"[WS] Authenticated user: {user_id} ({session.name})")
+
     connected = await manager.connect(websocket, actual_client_id)
     if not connected: return
     
@@ -40,7 +50,8 @@ async def websocket_endpoint(
                 if msg_type == "ping":
                     await websocket.send_json({"type": "pong"})
                 elif msg_type == "chat":
-                    await handle_chat_stream(actual_client_id, message)
+                    # 将 user_id 注入到 message context 中，或者作为参数传递
+                    await handle_chat_stream(actual_client_id, message, user_id)
                 elif msg_type == "apply_order_product":
                     await handle_apply_order_product(actual_client_id, message)
                 else:
@@ -54,7 +65,7 @@ async def websocket_endpoint(
         logger.error(f"[WS] Error: {e}")
         manager.disconnect(actual_client_id)
 
-async def handle_chat_stream(client_id: str, message: dict):
+async def handle_chat_stream(client_id: str, message: dict, user_id: str = "anonymous"):
     """处理对话流"""
     data = message.get("data", {})
     content = data.get("content", "")
@@ -71,13 +82,8 @@ async def handle_chat_stream(client_id: str, message: dict):
     except Exception:
         customer_id = None
 
-    if not customer_id:
-        await manager.send(client_id, EventType.CHAT_MESSAGE, {
-            "role": "agent",
-            "content": "请先选择客户",
-            "content_type": "text"
-        })
-        return
+    # 注意：不再强制要求选择客户，用户可以先上传文件识别，后续再选择客户
+    # customer_id 可能为空，这是允许的
     
     # 1. 准备文件
     file_bytes = None
@@ -110,7 +116,7 @@ async def handle_chat_stream(client_id: str, message: dict):
         # 发送任务开始信号
         await manager.send(client_id, EventType.TASK_START, {"table_id": None})
         
-        async for event in agent.process_request(content, context, file_bytes, filename):
+        async for event in agent.process_request(content, context, file_bytes, filename, user_id=user_id):
             event_type = event.get("type")
             
             if event_type == "tool_call":

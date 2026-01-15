@@ -36,7 +36,8 @@ class SimpleAgent:
         user_input: str, 
         context: Dict,
         file_data: Optional[bytes] = None, 
-        filename: Optional[str] = None
+        filename: Optional[str] = None,
+        user_id: str = "anonymous"
     ) -> AsyncGenerator[Dict, None]:
         """统一入口"""
         active_table_id = context.get("activeTableId")
@@ -90,8 +91,50 @@ class SimpleAgent:
             if filename.lower().endswith(('.jpg', '.png', '.jpeg', '.gif', '.webp')):
                 # 图片走 VL 模型
                 vl_prompt = """请提取图片中的所有订单/采购信息。
-输出要求：每行一个JSON对象，字段：识别商品、数量、单位、规格、备注。不要markdown代码块。"""
+输出要求：
+1. 必须输出为一行一个JSON对象。
+2. 每个商品行输出：{"识别商品": "xx", "数量": 1, "单位": "xx", "规格": "xx", "备注": ""}。备注字段必须留空("")。
+3. 如果图片包含手写文字（无论是否清晰），请在第一行输出：{"has_handwriting": true}。如果不包含，输出：{"has_handwriting": false}。
+4. 不要输出Markdown代码块，不要解释。"""
                 parsed_content = await llm_service.call_vl_model(image_data=file_data, prompt=vl_prompt)
+
+                # ========== 手写样本采集 (Data Collection) ==========
+                try:
+                    # 检查是否包含手写标记
+                    has_handwriting = False
+                    if '{"has_handwriting": true}' in parsed_content:
+                        has_handwriting = True
+                    
+                    if has_handwriting:
+                        import time
+                        import json
+                        import aiofiles
+                        from pathlib import Path
+                        
+                        # 保存目录: data/handwriting_samples/YYYYMMDD/user_id/
+                        date_str = time.strftime("%Y%m%d")
+                        save_dir = Path("data/handwriting_samples") / date_str / user_id
+                        save_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        # 文件名 ID
+                        sample_id = f"{int(time.time())}_{generate_trace_id().split('_')[-1]}"
+                        
+                        # 1. 保存原始图片
+                        ext = Path(file_path).suffix or ".jpg"
+                        img_path = save_dir / f"{sample_id}{ext}"
+                        async with aiofiles.open(img_path, 'wb') as f:
+                            await f.write(file_data)
+                        
+                        # 2. 保存识别结果 (Raw Text)
+                        json_path = save_dir / f"{sample_id}_raw.txt"
+                        async with aiofiles.open(json_path, 'w', encoding='utf-8') as f:
+                            await f.write(parsed_content)
+                            
+                        logger.info(f"[Handwriting] Sample collected: {sample_id}")
+                except Exception as e:
+                    logger.warning(f"[Handwriting] Failed to collect sample: {e}")
+                # ==================================================
+
                 content_to_process = f"【图片识别结果】\n{parsed_content}\n\n请分析并提取订单数据。"
             else:
                 # 文档走本地解析
@@ -180,7 +223,9 @@ class SimpleAgent:
 严格使用 JSON Lines 格式，每行一个对象：
 
 1. 新建表格：{"__new_table__": "表名（如：1月1日张三）"}
-2. 添加商品：{"识别商品": "xx", "数量": 1, "单位": "xx", "规格": "xx", "备注": "xx"}
+2. 添加商品：{"识别商品": "xx", "数量": 1, "单位": "xx", "规格": "xx", "备注": ""}
+
+注意：备注字段必须留空("")，由用户自行填写。
 """
         else:
             # 场景 B: 对话/操作 (Chat / Edit)
@@ -197,7 +242,8 @@ class SimpleAgent:
 - 对话：直接输出文字（可先解释你将如何处理）。
 - 生成/抽取订单并填表：输出 JSON Lines（每行一个 JSON 对象），用于直接写入表格：
   - 新建表格：{"__new_table__": "表名（如：1月1日张三）"}
-  - 添加商品：{"识别商品": "xx", "数量": 1, "单位": "xx", "规格": "xx", "备注": "xx"}
+  - 添加商品：{"识别商品": "xx", "数量": 1, "单位": "xx", "规格": "xx", "备注": ""}
+  - 注意：备注字段必须留空("")，由用户自行填写。
 - 操作已有表格：输出 JSON Action（每行一个对象也可以，但必须是合法 JSON）：
   - 修改：{"action": "update", "row": 1, "col": "识别商品", "value": "xx"}
   - 删除：{"action": "delete", "row": 2}

@@ -200,7 +200,7 @@ OCR 文本：
 }}"""
             
             messages = [
-                {"role": "system", "content": "你是智能表单助手，负责分析内容与校准技能的相关性。"},
+                {"role": "system", "content": "你是智能订单助手，负责分析内容与校准技能的相关性。"},
                 {"role": "user", "content": prompt}
             ]
             

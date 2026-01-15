@@ -28,9 +28,24 @@ class WebSocketClient {
     // 解析 URL
     this.url = this.resolveUrl(url);
     
+    // 获取 token (从 localStorage 中读取 auth-storage)
+    let token = '';
+    try {
+      const storage = localStorage.getItem('auth-storage');
+      if (storage) {
+        const parsed = JSON.parse(storage);
+        token = parsed.state?.token || '';
+      }
+    } catch (e) {
+      console.warn('[WS] Failed to get token from storage');
+    }
+
     return new Promise((resolve, reject) => {
       try {
-        const wsUrl = `${this.url}/agent?client_id=${this.clientId}`;
+        let wsUrl = `${this.url}/agent?client_id=${this.clientId}`;
+        if (token) {
+          wsUrl += `&token=${token}`;
+        }
         console.log(`[WS] Connecting to ${wsUrl}`);
         
         this.ws = new WebSocket(wsUrl);

@@ -15,6 +15,7 @@ from app.core.logger import app_logger as logger
 from app.core.connection_manager import manager
 from app.services.knowledge_base import vector_store
 from app.core.file_parser import parse_file_content
+from app.services.preference_store import preference_store
 
 router = APIRouter()
 
@@ -178,3 +179,71 @@ async def get_product_names():
     except Exception as e:
         logger.error(f"[Products] get names failed: {str(e)}")
         raise HTTPException(status_code=500, detail="获取商品库失败")
+
+
+# ========== 偏好管理 API ==========
+
+@router.get("/preferences/{customer_id}")
+async def get_preferences(customer_id: str):
+    """获取某客户的偏好映射列表"""
+    try:
+        await preference_store._load()
+        cid = preference_store._normalize_customer_id(customer_id)
+        prefs = preference_store._cache.get(cid, {})
+        # 返回数组格式，方便前端展示
+        items = [{"recognized": k, "order_product": v} for k, v in prefs.items()]
+        return {"customer_id": cid, "preferences": items}
+    except Exception as e:
+        logger.error(f"[Preferences] get failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="获取偏好失败")
+
+
+@router.put("/preferences/{customer_id}")
+async def update_preferences(customer_id: str, items: list):
+    """批量更新某客户的偏好（覆盖）"""
+    try:
+        cid = preference_store._normalize_customer_id(customer_id)
+        new_prefs = {}
+        for item in items:
+            r = (item.get("recognized") or "").strip()
+            o = (item.get("order_product") or "").strip()
+            if r and o:
+                new_prefs[r] = o
+        
+        async with preference_store._lock:
+            preference_store._cache[cid] = new_prefs
+            try:
+                preference_store.path.write_text(
+                    __import__("json").dumps(preference_store._cache, ensure_ascii=False, indent=2),
+                    encoding="utf-8"
+                )
+            except Exception as e:
+                logger.warning(f"[PreferenceStore] save failed: {e}")
+        
+        return {"success": True, "count": len(new_prefs)}
+    except Exception as e:
+        logger.error(f"[Preferences] update failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="更新偏好失败")
+
+
+@router.delete("/preferences/{customer_id}/{recognized}")
+async def delete_preference(customer_id: str, recognized: str):
+    """删除某条偏好"""
+    try:
+        cid = preference_store._normalize_customer_id(customer_id)
+        async with preference_store._lock:
+            if cid in preference_store._cache and recognized in preference_store._cache[cid]:
+                del preference_store._cache[cid][recognized]
+                try:
+                    preference_store.path.write_text(
+                        __import__("json").dumps(preference_store._cache, ensure_ascii=False, indent=2),
+                        encoding="utf-8"
+                    )
+                except Exception as e:
+                    logger.warning(f"[PreferenceStore] save failed: {e}")
+                return {"success": True}
+            else:
+                return {"success": False, "message": "偏好不存在"}
+    except Exception as e:
+        logger.error(f"[Preferences] delete failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="删除偏好失败")

@@ -1,11 +1,11 @@
-# 🤖 智能表单助手 (Smart Form Assistant)
+# 🤖 智能订单助手 (Smart Order Assistant)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/badge/Docker-Enabled-2496ED.svg)](DOCKER_DEPLOY.md)
 [![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg)](backend/)
 [![React](https://img.shields.io/badge/Frontend-React-61DAFB.svg)](frontend/)
 
-**智能表单助手**是一个基于 AI 驱动的多模态智能数据录入系统。它能够通过语音、图片、文档等多种方式接收输入，利用大语言模型（Qwen）和 AI Agent 技术自动提取、校准并填充结构化表格，极大地提高了数据录入效率和准确性。
+**智能订单助手**是一个基于 AI 驱动的多模态智能订单识别系统。它能够通过语音、图片、文档等多种方式接收输入，利用大语言模型（Qwen）和 AI Agent 技术自动提取、校准并填充结构化表格，极大地提高了订单处理效率和准确性。
 
 ## ✨ 核心特性
 

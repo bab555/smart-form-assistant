@@ -325,6 +325,48 @@ class KnowledgeBaseService:
         """
         return self.product_index.calibrate(raw_text, category)
     
+    async def reload_from_remote(self, products: List[Dict[str, Any]]) -> None:
+        """
+        从远端 API 数据重载商品库
+        
+        Args:
+            products: 商品列表，格式：
+                [{"id": "1", "name": "大白菜", "spec": "500g", "unit": "斤", "category": "蔬菜"}, ...]
+        """
+        logger.info(f"开始从远端数据重载商品库，共 {len(products)} 条")
+        
+        # 清空现有索引
+        self.product_index = FastProductIndex()
+        
+        # 导入商品
+        for item in products:
+            product = Product(
+                id=int(item.get("id", 0)) if item.get("id") else 0,
+                code=str(item.get("code", "")),
+                name=str(item.get("name", "")).strip(),
+                category=str(item.get("category", "")) or "未分类",
+                category2="",
+                category3="",
+                unit=str(item.get("unit", "")) or "个",
+                price=0.0,
+                spec=str(item.get("spec", "")),
+                brand="",
+                manufacturer="",
+                status="上架",
+            )
+            
+            if product.name:
+                self.product_index.add_product(product)
+        
+        # 保存缓存
+        self._save_index()
+        
+        # 更新全局实例
+        global product_index
+        product_index = self.product_index
+        
+        logger.info(f"✅ 远端商品库重载完成，共 {self.product_index.total_count} 条")
+    
     async def batch_calibrate(
         self,
         texts: List[str],

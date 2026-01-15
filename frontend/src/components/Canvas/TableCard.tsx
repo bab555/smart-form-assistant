@@ -15,7 +15,8 @@ import type { ColDef, CellValueChangedEvent, ICellRendererParams } from 'ag-grid
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
 import { useCanvasStore, TableData, TableRow } from '@/store/useCanvasStore';
-import { AlertTriangle, Loader2, X, Plus, Download, Calendar, User, Store, ClipboardList, AlertCircle, Send } from 'lucide-react';
+import { useDataStore } from '@/store/useDataStore';
+import { AlertTriangle, Loader2, X, Plus, Download, Calendar, User, Store, ClipboardList, AlertCircle, Send, Settings, Trash2 } from 'lucide-react';
 import { exportTableToExcel, exportAllTablesToExcel } from '@/utils/export';
 import { ContextMenu, MenuItem } from './ContextMenu';
 import { wsClient } from '@/services/websocket';
@@ -29,57 +30,6 @@ const formatDateTimeLocal = (date: Date): string => {
   const hours = String(date.getHours()).padStart(2, '0');
   const minutes = String(date.getMinutes()).padStart(2, '0');
   return `${year}-${month}-${day}T${hours}:${minutes}`;
-};
-
-// Mock 客户数据
-const MOCK_CLIENTS = [
-  { id: 'c1', name: '张三餐饮' },
-  { id: 'c2', name: '李四超市' },
-  { id: 'c3', name: '王五食堂' },
-  { id: 'c4', name: '赵六酒店' },
-];
-
-// Mock 餐厅数据（按客户分组）
-const MOCK_RESTAURANTS: Record<string, Array<{ id: string; name: string }>> = {
-  'c1': [
-    { id: 'r1-1', name: '张三餐饮-东风路店' },
-    { id: 'r1-2', name: '张三餐饮-人民路店' },
-    { id: 'r1-3', name: '张三餐饮-中山店' },
-  ],
-  'c2': [
-    { id: 'r2-1', name: '李四超市-总店' },
-    { id: 'r2-2', name: '李四超市-分店' },
-  ],
-  'c3': [
-    { id: 'r3-1', name: '王五食堂-A区' },
-    { id: 'r3-2', name: '王五食堂-B区' },
-    { id: 'r3-3', name: '王五食堂-C区' },
-  ],
-  'c4': [
-    { id: 'r4-1', name: '赵六酒店-大堂' },
-    { id: 'r4-2', name: '赵六酒店-宴会厅' },
-  ],
-};
-
-// Mock 订单类型数据（按客户分组）
-const MOCK_ORDER_TYPES: Record<string, Array<{ id: string; name: string }>> = {
-  'c1': [
-    { id: 'ot1-1', name: '订单1-日常采购' },
-    { id: 'ot1-2', name: '订单2-活动采购' },
-  ],
-  'c2': [
-    { id: 'ot2-1', name: '订单1-门店补货' },
-    { id: 'ot2-2', name: '订单2-促销备货' },
-  ],
-  'c3': [
-    { id: 'ot3-1', name: '订单1-早餐' },
-    { id: 'ot3-2', name: '订单2-午餐' },
-    { id: 'ot3-3', name: '订单3-晚餐' },
-  ],
-  'c4': [
-    { id: 'ot4-1', name: '订单1-日常' },
-    { id: 'ot4-2', name: '订单2-宴席' },
-  ],
 };
 
 // 行操作按钮组件
@@ -163,6 +113,11 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   const customerHighlightUntil = useCanvasStore((state) => state.customerHighlightUntil);
   const openCustomerModal = useCanvasStore((state) => state.openCustomerModal);
   
+  // 动态数据（从远端 API 加载）
+  const partners = useDataStore((state) => state.partners);
+  const restaurants = useDataStore((state) => state.restaurants);
+  const orderTypes = useDataStore((state) => state.orderTypes);
+  
   // 右键菜单状态
   const [contextMenu, setContextMenu] = useState<{ isOpen: boolean; x: number; y: number }>({
     isOpen: false,
@@ -174,16 +129,24 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   const [deletingRowIndex, setDeletingRowIndex] = useState<number | null>(null);
   // "替换为订单商品"弹窗
   const [applyingRowIndex, setApplyingRowIndex] = useState<number | null>(null);
-  // 商品选择弹窗（点击感叹号触发）
+  // 商品选择弹窗（点击商品 / 添加新商品）
+  // mode: 'edit' 编辑现有行, 'add' 新增商品
   const [productPickerState, setProductPickerState] = useState<{
     isOpen: boolean;
     rowIndex: number;
-  }>({ isOpen: false, rowIndex: -1 });
+    mode: 'edit' | 'add';
+  }>({ isOpen: false, rowIndex: -1, mode: 'edit' });
 
   // 商品库名称列表（全量）
   const [productNames, setProductNames] = useState<string[]>([]);
   const [productNamesLoading, setProductNamesLoading] = useState(false);
   const [productSearch, setProductSearch] = useState('');
+
+  // 偏好编辑弹窗
+  const [preferenceEditorOpen, setPreferenceEditorOpen] = useState(false);
+  const [preferences, setPreferences] = useState<Array<{ recognized: string; order_product: string }>>([]);
+  const [preferencesLoading, setPreferencesLoading] = useState(false);
+  const [preferenceSearch, setPreferenceSearch] = useState('');
 
   const normalize = useCallback((s: string) => s.trim().toLowerCase().replace(/\s+/g, ''), []);
 
@@ -288,16 +251,6 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   const handleTimeBlur = useCallback(() => {
     isEditingTimeRef.current = false;
   }, []);
-  
-  // 添加新行
-  const handleAddRow = useCallback((e?: React.MouseEvent) => {
-    e?.stopPropagation();
-    if (!table.metadata.customerId) {
-      openCustomerModal(table.id);
-      return;
-    }
-    addRow(table.id);
-  }, [table.id, table.metadata.customerId, addRow, openCustomerModal]);
 
   // 删除行（显示确认弹窗）
   const handleDeleteRowRequest = useCallback((rowIndex: number) => {
@@ -347,39 +300,154 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     }
   }, [productNames.length, productNamesLoading]);
 
-  const openProductPicker = useCallback((rowIndex: number) => {
+  const openProductPicker = useCallback((rowIndex: number, mode: 'edit' | 'add' = 'edit') => {
     setProductSearch('');
-    setProductPickerState({ isOpen: true, rowIndex });
+    setProductPickerState({ isOpen: true, rowIndex, mode });
     void ensureProductNamesLoaded();
   }, [ensureProductNamesLoaded]);
 
+  // 添加新商品（打开商品选择弹窗）
+  const handleAddProduct = useCallback((e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    openProductPicker(-1, 'add');
+  }, [openProductPicker]);
+
   // 关闭商品选择弹窗
   const closeProductPicker = useCallback(() => {
-    setProductPickerState({ isOpen: false, rowIndex: -1 });
+    setProductPickerState({ isOpen: false, rowIndex: -1, mode: 'edit' });
   }, []);
+
+  // 打开偏好编辑器
+  const openPreferenceEditor = useCallback(async () => {
+    if (!table.metadata.customerId) {
+      openCustomerModal(table.id);
+      return;
+    }
+    setPreferenceSearch('');
+    setPreferencesLoading(true);
+    setPreferenceEditorOpen(true);
+    try {
+      const resp = await fetch(`/api/preferences/${encodeURIComponent(table.metadata.customerId)}`);
+      if (!resp.ok) throw new Error('获取偏好失败');
+      const data = await resp.json();
+      setPreferences(data.preferences || []);
+    } catch (err) {
+      console.error('获取偏好失败:', err);
+      setPreferences([]);
+    } finally {
+      setPreferencesLoading(false);
+    }
+  }, [table.metadata.customerId, table.id, openCustomerModal]);
+
+  // 关闭偏好编辑器
+  const closePreferenceEditor = useCallback(() => {
+    setPreferenceEditorOpen(false);
+    setPreferences([]);
+  }, []);
+
+  // 保存偏好
+  const savePreferences = useCallback(async () => {
+    if (!table.metadata.customerId) return;
+    try {
+      const resp = await fetch(`/api/preferences/${encodeURIComponent(table.metadata.customerId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(preferences),
+      });
+      if (!resp.ok) throw new Error('保存失败');
+      closePreferenceEditor();
+    } catch (err) {
+      console.error('保存偏好失败:', err);
+      alert('保存偏好失败，请重试');
+    }
+  }, [table.metadata.customerId, preferences, closePreferenceEditor]);
+
+  // 添加新偏好
+  const addPreference = useCallback(() => {
+    setPreferences(prev => [...prev, { recognized: '', order_product: '' }]);
+  }, []);
+
+  // 删除偏好
+  const deletePreference = useCallback((index: number) => {
+    setPreferences(prev => prev.filter((_, i) => i !== index));
+  }, []);
+
+  // 更新偏好
+  const updatePreference = useCallback((index: number, field: 'recognized' | 'order_product', value: string) => {
+    setPreferences(prev => prev.map((item, i) => 
+      i === index ? { ...item, [field]: value } : item
+    ));
+  }, []);
+
+  // 过滤后的偏好列表
+  const filteredPreferences = useMemo(() => {
+    const q = preferenceSearch.trim().toLowerCase();
+    if (!q) return preferences;
+    return preferences.filter(p => 
+      p.recognized.toLowerCase().includes(q) || 
+      p.order_product.toLowerCase().includes(q)
+    );
+  }, [preferences, preferenceSearch]);
 
   // 选择商品（商品选择弹窗中用户选择后）
   const handleProductSelect = useCallback((selectedProduct: string) => {
-    const { rowIndex } = productPickerState;
-    if (rowIndex < 0) return;
+    const { rowIndex, mode } = productPickerState;
     
-    // 通过 WebSocket 请求后端处理（包含覆盖规格/单位 + 可选的偏好保存）
-    const row = table.rows[rowIndex] as any;
-    const recognized = (row?.['识别商品'] || '').toString();
-    
-    // 发送请求，让后端覆盖 订单商品、规格、单位 + 记录偏好
-    wsClient.send('apply_order_product', {
-      table_id: table.id,
-      row_index: rowIndex,
-      mode: 'A', // 默认记录偏好
-      recognized,
-      selected: selectedProduct,
-      order_value: selectedProduct,
-      customer_id: table.metadata.customerId || '',
-    });
+    if (mode === 'add') {
+      // 新增商品模式：添加一行新数据
+      // 计算新的序号（当前最大序号 + 1）
+      const maxSeq = table.rows.reduce((max, row) => {
+        const seq = Number(row['序号']) || 0;
+        return Math.max(max, seq);
+      }, 0);
+      
+      // 创建新行（序号、识别商品、订单商品 填入选择的商品名）
+      const newRow: Record<string, unknown> = {
+        '序号': maxSeq + 1,
+        '识别商品': selectedProduct,
+        '订单商品': selectedProduct,
+        '数量': 1,
+        '单位': '',
+        '规格': '',
+        '备注': '',
+        __order_status: 'exact',
+        __order_candidates: [],
+        __order_selected: '',
+      };
+      
+      addRow(table.id, newRow);
+      
+      // 同时请求后端获取该商品的规格/单位信息
+      wsClient.send('apply_order_product', {
+        table_id: table.id,
+        row_index: table.rows.length, // 新行的索引
+        mode: 'A',
+        recognized: selectedProduct,
+        selected: selectedProduct,
+        order_value: selectedProduct,
+        customer_id: table.metadata.customerId || '',
+      });
+    } else {
+      // 编辑现有行模式
+      if (rowIndex < 0) return;
+      
+      const row = table.rows[rowIndex] as any;
+      const recognized = (row?.['识别商品'] || '').toString();
+      
+      // 发送请求，让后端覆盖 订单商品、规格、单位 + 记录偏好
+      wsClient.send('apply_order_product', {
+        table_id: table.id,
+        row_index: rowIndex,
+        mode: 'A', // 默认记录偏好
+        recognized,
+        selected: selectedProduct,
+        order_value: selectedProduct,
+        customer_id: table.metadata.customerId || '',
+      });
+    }
     
     closeProductPicker();
-  }, [productPickerState, table.id, table.metadata.customerId, table.rows, closeProductPicker]);
+  }, [productPickerState, table.id, table.metadata.customerId, table.rows, closeProductPicker, addRow]);
 
   const confirmApplyOrder = useCallback(async (mode: 'A' | 'B' | 'C') => {
     if (applyingRowIndex === null) return;
@@ -414,7 +482,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     exportAllTablesToExcel(tables);
   }, [tables, table.id, table.metadata.customerId, openCustomerModal]);
 
-  // 关闭当前 Sheet
+  // 关闭当前 Sheet（不再限制客户选择）
   const handleCloseSheet = useCallback(() => {
     if (onCloseRequest) {
       onCloseRequest(table.id);
@@ -434,7 +502,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   // 元数据变更
   const handleClientChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const clientId = e.target.value;
-    const client = MOCK_CLIENTS.find(c => c.id === clientId);
+    const client = partners.find(c => c.id === clientId);
     // 选择客户后，清空餐厅和订单类型
     updateMetadata(table.id, { 
       customerId: clientId, 
@@ -448,7 +516,6 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
 
   const handleRestaurantChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const restaurantId = e.target.value;
-    const restaurants = MOCK_RESTAURANTS[table.metadata.customerId as string] || [];
     const restaurant = restaurants.find(r => r.id === restaurantId);
     updateMetadata(table.id, { 
       restaurantId, 
@@ -458,7 +525,6 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
 
   const handleOrderTypeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const orderTypeId = e.target.value;
-    const orderTypes = MOCK_ORDER_TYPES[table.metadata.customerId as string] || [];
     const orderType = orderTypes.find(o => o.id === orderTypeId);
     updateMetadata(table.id, { 
       orderTypeId, 
@@ -470,31 +536,109 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     updateMetadata(table.id, { date: e.target.value });
   };
 
-  // 提交当前订单（预留功能）
+  // 检查表格是否有未处理的商品（需要选择的行）
+  const checkUnprocessedRows = useCallback((rows: TableRow[]) => {
+    const unprocessed: number[] = [];
+    rows.forEach((row, index) => {
+      const status = (row as Record<string, unknown>).__order_status;
+      // 如果状态不是 'exact'（精确匹配），说明需要用户处理
+      if (status && status !== 'exact') {
+        unprocessed.push(index + 1); // 行号从1开始显示
+      }
+    });
+    return unprocessed;
+  }, []);
+
+  // 准备提交数据：用"订单商品"覆盖，提取需要的字段
+  const prepareSubmitData = useCallback((rows: TableRow[]) => {
+    return rows.map((row, index) => {
+      const r = row as Record<string, unknown>;
+      return {
+        序号: index + 1,
+        商品名称: r['订单商品'] || r['识别商品'] || '', // 优先使用订单商品
+        数量: r['数量'] || 0,
+        单位: r['单位'] || '',
+        规格: r['规格'] || '',
+        备注: r['备注'] || '',
+      };
+    });
+  }, []);
+
+  // 提交当前订单
   const handleSubmitCurrent = useCallback(() => {
     if (!table.metadata.customerId) {
       openCustomerModal(table.id);
       return;
     }
-    alert('当前表格已打包完毕，后端暂未连接提交服务');
-  }, [table.id, table.metadata.customerId, openCustomerModal]);
+    
+    // 检查是否有未处理的行
+    const unprocessed = checkUnprocessedRows(table.rows);
+    if (unprocessed.length > 0) {
+      alert(`以下行的商品尚未确认，请先处理：\n第 ${unprocessed.join('、')} 行\n\n请点击对应行的商品进行选择确认。`);
+      return;
+    }
+    
+    // 准备提交数据
+    const submitData = prepareSubmitData(table.rows);
+    console.log('提交当前订单数据:', {
+      tableId: table.id,
+      customer: table.metadata.customerId,
+      restaurant: table.metadata.restaurantId,
+      orderType: table.metadata.orderTypeId,
+      date: table.metadata.date,
+      items: submitData,
+    });
+    
+    alert(`当前表格已打包完毕！\n共 ${submitData.length} 条商品\n\n（后端提交服务待对接）`);
+  }, [table.id, table.metadata, table.rows, openCustomerModal, checkUnprocessedRows, prepareSubmitData]);
 
-  // 提交所有订单（预留功能）
+  // 提交所有订单
   const handleSubmitAll = useCallback(() => {
     if (!table.metadata.customerId) {
       openCustomerModal(table.id);
       return;
     }
-    alert('所有表格已打包完毕，后端暂未连接提交服务');
-  }, [table.id, table.metadata.customerId, openCustomerModal]);
+    
+    // 检查所有表格是否有未处理的行
+    const allUnprocessed: { tableTitle: string; rows: number[] }[] = [];
+    Object.values(tables).forEach((t) => {
+      const unprocessed = checkUnprocessedRows(t.rows);
+      if (unprocessed.length > 0) {
+        allUnprocessed.push({
+          tableTitle: t.title || t.id,
+          rows: unprocessed,
+        });
+      }
+    });
+    
+    if (allUnprocessed.length > 0) {
+      const msg = allUnprocessed
+        .map((u) => `【${u.tableTitle}】第 ${u.rows.join('、')} 行`)
+        .join('\n');
+      alert(`以下表格存在未确认的商品：\n${msg}\n\n请先处理完毕再提交。`);
+      return;
+    }
+    
+    // 准备所有表格的提交数据
+    const allSubmitData = Object.values(tables).map((t) => ({
+      tableId: t.id,
+      tableTitle: t.title,
+      customer: t.metadata.customerId,
+      restaurant: t.metadata.restaurantId,
+      orderType: t.metadata.orderTypeId,
+      date: t.metadata.date,
+      items: prepareSubmitData(t.rows),
+    }));
+    
+    const totalItems = allSubmitData.reduce((sum, t) => sum + t.items.length, 0);
+    console.log('提交所有订单数据:', allSubmitData);
+    
+    alert(`所有表格已打包完毕！\n共 ${allSubmitData.length} 个表格，${totalItems} 条商品\n\n（后端提交服务待对接）`);
+  }, [table.id, table.metadata.customerId, tables, openCustomerModal, checkUnprocessedRows, prepareSubmitData]);
 
-  // 获取当前客户的餐厅和订单类型列表
-  const currentRestaurants = table.metadata.customerId 
-    ? (MOCK_RESTAURANTS[table.metadata.customerId as string] || []) 
-    : [];
-  const currentOrderTypes = table.metadata.customerId 
-    ? (MOCK_ORDER_TYPES[table.metadata.customerId as string] || []) 
-    : [];
+  // 获取餐厅和订单类型列表（现在是全局列表，不再按客户分组）
+  const currentRestaurants = restaurants;
+  const currentOrderTypes = orderTypes;
 
   // 列定义
   const columnDefs: ColDef<TableRow>[] = useMemo(() => {
@@ -573,11 +717,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     const rowIndex = e.rowIndex;
     const field = e.colDef.field;
     if (rowIndex == null || !field) return;
-    // 全局规则：未选客户，不允许任何操作（包含编辑表格）
-    if (!table.metadata.customerId) {
-      openCustomerModal(table.id);
-      return;
-    }
+    // 编辑单元格不再限制客户选择（用户可自由编辑，提交/下载时再校验客户）
     updateCell(table.id, rowIndex, field, e.newValue);
   };
 
@@ -598,9 +738,9 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   
   const tableMenuItems: MenuItem[] = useMemo(() => [
     {
-      label: '添加行',
+      label: '添加新商品',
       icon: <Plus size={14} />,
-      onClick: () => handleAddRow(),
+      onClick: () => handleAddProduct(),
     },
     {
       label: '删除选中行',
@@ -632,7 +772,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
       divider: true,
       danger: true,
     },
-  ], [table.id, table.rows.length, handleAddRow, handleDeleteRowRequest, handleExport, handleExportAll, handleCloseSheet]);
+  ], [table.id, table.rows.length, handleAddProduct, handleDeleteRowRequest, handleExport, handleExportAll, handleCloseSheet]);
 
   // 获取有校对备注的行索引
   const rowsWithNotes = Object.keys(table.calibrationNotes).map(Number);
@@ -692,17 +832,21 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
         </div>
       )}
 
-      {/* 商品选择弹窗（点击感叹号后触发） */}
+      {/* 商品选择弹窗（选择/添加商品） */}
       {productPickerState.isOpen && (
         <div className="confirm-modal-overlay product-picker-overlay">
           <div className="confirm-modal-backdrop" onClick={closeProductPicker} />
         <div className="product-picker-modal large">
             <div className="confirm-header">
-              <AlertTriangle size={20} className="icon-warning" />
-              <span>请选择商品（完整商品库）</span>
+              <Plus size={20} className="icon-primary" />
+              <span>{productPickerState.mode === 'add' ? '添加新商品' : '选择商品'}</span>
             </div>
             <div className="product-picker-body">
-              <p className="picker-hint">从完整商品库中搜索并选择正确的商品：</p>
+              <p className="picker-hint">
+                {productPickerState.mode === 'add' 
+                  ? '从商品库中选择要添加的商品，选择后自动添加一行：' 
+                  : '从完整商品库中搜索并选择正确的商品：'}
+              </p>
               <input
                 className="picker-search"
                 placeholder="搜索商品名..."
@@ -727,10 +871,94 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
                   ))}
                 </div>
               )}
-              <p className="picker-note">选择后将自动覆盖「识别商品」「规格」「单位」并记录偏好。</p>
+              <p className="picker-note">
+                {productPickerState.mode === 'add' 
+                  ? '选择后将自动添加一行新商品（自动递增序号）。' 
+                  : '选择后将自动覆盖「识别商品」「规格」「单位」并记录偏好。'}
+              </p>
             </div>
             <div className="confirm-footer">
               <button className="btn-cancel" onClick={closeProductPicker}>取消</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 偏好编辑弹窗 */}
+      {preferenceEditorOpen && (
+        <div className="confirm-modal-overlay preference-editor-overlay">
+          <div className="confirm-modal-backdrop" onClick={closePreferenceEditor} />
+          <div className="preference-editor-modal">
+            <div className="confirm-header">
+              <Settings size={20} className="icon-primary" />
+              <span>编辑偏好映射</span>
+            </div>
+            <div className="preference-editor-body">
+              <p className="picker-hint">
+                管理「识别商品 → 订单商品」的偏好映射，系统会根据此映射自动校正识别结果。
+              </p>
+              <div className="preference-toolbar">
+                <input
+                  className="picker-search"
+                  placeholder="搜索偏好..."
+                  value={preferenceSearch}
+                  onChange={(e) => setPreferenceSearch(e.target.value)}
+                />
+                <button className="btn-add-pref" onClick={addPreference}>
+                  <Plus size={14} />
+                  添加
+                </button>
+              </div>
+              {preferencesLoading ? (
+                <div className="picker-loading">加载偏好中...</div>
+              ) : filteredPreferences.length === 0 && !preferenceSearch ? (
+                <div className="preference-empty">暂无偏好记录，点击"添加"创建新偏好</div>
+              ) : filteredPreferences.length === 0 ? (
+                <div className="preference-empty">没有匹配的偏好</div>
+              ) : (
+                <div className="preference-list">
+                  <div className="preference-header-row">
+                    <span className="pref-col-recognized">识别商品</span>
+                    <span className="pref-col-arrow">→</span>
+                    <span className="pref-col-order">订单商品</span>
+                    <span className="pref-col-action">操作</span>
+                  </div>
+                  {filteredPreferences.map((pref, index) => {
+                    const realIndex = preferences.findIndex(p => p === pref);
+                    return (
+                      <div className="preference-row" key={index}>
+                        <input
+                          className="pref-input"
+                          value={pref.recognized}
+                          placeholder="识别商品名"
+                          onChange={(e) => updatePreference(realIndex, 'recognized', e.target.value)}
+                        />
+                        <span className="pref-arrow">→</span>
+                        <input
+                          className="pref-input"
+                          value={pref.order_product}
+                          placeholder="订单商品名"
+                          onChange={(e) => updatePreference(realIndex, 'order_product', e.target.value)}
+                        />
+                        <button 
+                          className="pref-delete-btn" 
+                          onClick={() => deletePreference(realIndex)}
+                          title="删除此偏好"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <p className="picker-note">
+                偏好会按客户隔离存储，当前客户: {table.metadata.customerId || '(未选择)'}
+              </p>
+            </div>
+            <div className="confirm-footer">
+              <button className="btn-cancel" onClick={closePreferenceEditor}>取消</button>
+              <button className="btn-primary" onClick={savePreferences}>保存</button>
             </div>
           </div>
         </div>
@@ -773,7 +1001,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
             onChange={handleClientChange}
           >
             <option value="">-- 选择客户 --</option>
-            {MOCK_CLIENTS.map(c => (
+            {partners.map(c => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
@@ -825,10 +1053,16 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
           />
         </div>
 
-        {/* 添加行按钮 */}
-        <button className="add-row-btn" onClick={handleAddRow} title="添加行">
+        {/* 编辑偏好按钮 */}
+        <button className="preference-btn" onClick={openPreferenceEditor} title="编辑偏好">
+          <Settings size={14} />
+          <span>编辑偏好</span>
+        </button>
+
+        {/* 添加新商品按钮 */}
+        <button className="add-row-btn" onClick={handleAddProduct} title="添加新商品">
           <Plus size={14} />
-          <span>添加行</span>
+          <span>添加商品</span>
         </button>
       </div>
 

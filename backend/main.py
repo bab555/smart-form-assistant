@@ -1,5 +1,5 @@
 """
-智能表单助手 - FastAPI 主程序
+智能订单助手 - FastAPI 主程序
 """
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -14,7 +14,7 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.logger import app_logger as logger
 from app.core.events import startup_event, shutdown_event
-from app.api import endpoints, websocket, skills
+from app.api import endpoints, websocket, skills, remote_api
 
 
 @asynccontextmanager
@@ -29,8 +29,8 @@ async def lifespan(app: FastAPI):
 
 # 创建 FastAPI 应用
 app = FastAPI(
-    title="智能表单助手 API",
-    description="基于 AI 的多模态智能表单填写系统",
+    title="智能订单助手 API",
+    description="基于 AI 的多模态智能订单识别系统",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -82,6 +82,13 @@ app.include_router(
     tags=["Skills"]
 )
 
+# 远端 API 代理路由
+app.include_router(
+    remote_api.router,
+    prefix="/api",
+    tags=["RemoteAPI"]
+)
+
 
 # ========== 静态文件与 SPA 路由 ==========
 
@@ -122,7 +129,7 @@ else:
     async def root():
         """根路径"""
         return {
-            "service": "智能表单助手后端",
+            "service": "智能订单助手后端",
             "version": "1.0.0",
             "status": "running",
             "docs": "/docs",
