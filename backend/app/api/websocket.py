@@ -280,6 +280,7 @@ async def handle_apply_order_product(client_id: str, message: dict):
         ("__order_status", "exact"),
         ("__order_candidates", []),
         ("__order_selected", ""),
+        ("__goods_id", product.id or ""),  # 存储商品ID
     ]
 
     for key, value in updates:

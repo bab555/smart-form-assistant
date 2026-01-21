@@ -55,9 +55,11 @@ class SyncRequest(BaseModel):
 
 
 class SubmitOrderRequest(BaseModel):
+    partnerId: str
     restaurantId: str
     orderTypeId: str
     date: str
+    remark: Optional[str] = ""
     items: List[Dict[str, Any]]
 
 
@@ -153,21 +155,18 @@ async def get_partners(authorization: Optional[str] = Header(None)):
     
     # 解析数据
     partners = []
-    raw_data = result.get("data", [])
+    # API 返回的是 list 字段，不是 data
+    raw_data = result.get("list", [])
+    if not raw_data:
+        # 尝试兼容 data 字段
+        raw_data = result.get("data", [])
     
     for item in raw_data:
-        if session.user_type == "purchaser":
-            # 配送商列表
-            partners.append({
-                "id": str(item.get("supplier_id", "")),
-                "name": item.get("supplier_name", ""),
-            })
-        else:
-            # 学校列表
-            partners.append({
-                "id": str(item.get("purchaser_id", "")),
-                "name": item.get("purchaser_name", ""),
-            })
+        # API 直接返回 id 和 name
+        partners.append({
+            "id": str(item.get("id", "")),
+            "name": item.get("name", ""),
+        })
     
     logger.info(f"[Partners] parsed {len(partners)} items")
     return {"success": True, "data": partners}
@@ -194,8 +193,8 @@ async def get_restaurants(authorization: Optional[str] = Header(None)):
     restaurants = []
     for item in result.get("data", []):
         restaurants.append({
-            "id": str(item.get("warehouse_id", "")),
-            "name": item.get("warehouse_name", ""),
+            "id": str(item.get("id", "")),
+            "name": item.get("name", ""),
         })
     
     return {"success": True, "data": restaurants}
@@ -222,8 +221,8 @@ async def get_order_types(authorization: Optional[str] = Header(None)):
     order_types = []
     for item in result.get("data", []):
         order_types.append({
-            "id": str(item.get("order_type_id", "")),
-            "name": item.get("type_name", ""),
+            "id": str(item.get("id", "")),
+            "name": item.get("name", ""),
         })
     
     return {"success": True, "data": order_types}
@@ -264,9 +263,9 @@ async def sync_products(req: SyncRequest, authorization: Optional[str] = Header(
     for item in result.get("data", []):
         products.append({
             "id": str(item.get("goods_id", "")),
-            "name": item.get("goods_name", ""),
-            "spec": item.get("goods_spec", ""),
-            "unit": item.get("goods_unit", ""),
+            "name": item.get("name", ""),
+            "spec": item.get("spec", ""),
+            "unit": item.get("unit", ""),
             "category": item.get("category_name", ""),
         })
     
@@ -292,9 +291,7 @@ async def sync_products(req: SyncRequest, authorization: Optional[str] = Header(
 @router.post("/order/submit")
 async def submit_order(req: SubmitOrderRequest, authorization: Optional[str] = Header(None)):
     """
-    提交订单（预留接口）
-    
-    TODO: 待网站方提供接口文档后对接
+    提交订单
     """
     token = extract_token(authorization)
     if not token:
@@ -306,7 +303,7 @@ async def submit_order(req: SubmitOrderRequest, authorization: Optional[str] = H
     
     logger.info(f"[SubmitOrder] Order submission request: {req.dict()}")
     
-    # 数据校验
+    # 1. 数据校验
     if not req.restaurantId:
         return {"success": False, "message": "请选择餐厅"}
     
@@ -316,7 +313,7 @@ async def submit_order(req: SubmitOrderRequest, authorization: Optional[str] = H
     if not req.items:
         return {"success": False, "message": "订单商品不能为空"}
     
-    # 检查是否有未确认的商品
+    # 检查是否有未确认的商品 (goodsId 必须存在)
     for idx, item in enumerate(req.items):
         if not item.get("goodsId"):
             return {
@@ -324,10 +321,56 @@ async def submit_order(req: SubmitOrderRequest, authorization: Optional[str] = H
                 "message": f"第 {idx + 1} 行商品未确认，请先选择对应的订单商品"
             }
     
-    # TODO: 实际提交到远端
-    return {
-        "success": False, 
-        "message": "订单提交接口待对接，数据校验通过",
-        "validatedItems": len(req.items)
+    # 2. 构造远端 API 请求数据
+    payload = {
+        "order_type": req.orderTypeId,
+        "warehouse_id": req.restaurantId,
+        "collect_date": req.date.replace("-", "/"), # 确保格式为 YYYY/MM/DD
+        "remark": req.remark or "",
+        "item": []
     }
+    
+    # 根据用户类型填充 supplier_id / purchaser_id
+    if session.user_type == "purchaser":
+        # 学校登录: supplier_id 为必填 (选中的配送商), purchaser_id 为自己
+        payload["supplier_id"] = req.partnerId
+        payload["purchaser_id"] = session.genus_id
+    else:
+        # 配送商登录: purchaser_id 为必填 (选中的学校), supplier_id 为自己
+        payload["purchaser_id"] = req.partnerId
+        payload["supplier_id"] = session.genus_id
+        
+    # 填充商品列表
+    for item in req.items:
+        payload["item"].append({
+            "goods_id": str(item.get("goodsId")),
+            "buy_quantity": str(item.get("quantity")),
+            "buy_unit": str(item.get("unit")),
+            "remark": str(item.get("remark") or "")
+        })
+        
+    logger.info(f"[SubmitOrder] Sending payload to remote: {payload}")
+    
+    # 3. 发送请求
+    result = await remote_session_manager.request(
+        token, "POST", "/index.php",
+        params={"op": "goods_order_set"},
+        data=payload # request方法会自动处理json/data
+    )
+    
+    logger.info(f"[SubmitOrder] Remote response: {result}")
+    
+    if result and result.get("code") == 0:
+        return {
+            "success": True,
+            "message": "订单提交成功",
+            "orderId": result.get("id"),
+            "tradeNo": result.get("trade_no")
+        }
+    else:
+        msg = result.get("msg") or result.get("message") or "提交失败"
+        return {
+            "success": False,
+            "message": f"提交失败: {msg}"
+        }
 

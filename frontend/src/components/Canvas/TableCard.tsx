@@ -16,6 +16,7 @@ import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
 import { useCanvasStore, TableData, TableRow } from '@/store/useCanvasStore';
 import { useDataStore } from '@/store/useDataStore';
+import { useAuthStore } from '@/store/useAuthStore';
 import { AlertTriangle, Loader2, X, Plus, Download, Calendar, User, Store, ClipboardList, AlertCircle, Send, Settings, Trash2 } from 'lucide-react';
 import { exportTableToExcel, exportAllTablesToExcel } from '@/utils/export';
 import { ContextMenu, MenuItem } from './ContextMenu';
@@ -413,6 +414,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
         __order_status: 'exact',
         __order_candidates: [],
         __order_selected: '',
+        __goods_id: '', // 初始化为空，等待后端返回
       };
       
       addRow(table.id, newRow);
@@ -551,21 +553,19 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
 
   // 准备提交数据：用"订单商品"覆盖，提取需要的字段
   const prepareSubmitData = useCallback((rows: TableRow[]) => {
-    return rows.map((row, index) => {
+    return rows.map((row) => {
       const r = row as Record<string, unknown>;
       return {
-        序号: index + 1,
-        商品名称: r['订单商品'] || r['识别商品'] || '', // 优先使用订单商品
-        数量: r['数量'] || 0,
-        单位: r['单位'] || '',
-        规格: r['规格'] || '',
-        备注: r['备注'] || '',
+        goodsId: r['__goods_id'], // 必须包含商品ID
+        quantity: r['数量'] || 0,
+        unit: r['单位'] || '',
+        remark: r['备注'] || '',
       };
     });
   }, []);
 
   // 提交当前订单
-  const handleSubmitCurrent = useCallback(() => {
+  const handleSubmitCurrent = useCallback(async () => {
     if (!table.metadata.customerId) {
       openCustomerModal(table.id);
       return;
@@ -577,23 +577,62 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
       alert(`以下行的商品尚未确认，请先处理：\n第 ${unprocessed.join('、')} 行\n\n请点击对应行的商品进行选择确认。`);
       return;
     }
+
+    // 检查元数据完整性
+    if (!table.metadata.restaurantId) {
+      alert('请选择餐厅');
+      return;
+    }
+    if (!table.metadata.orderTypeId) {
+      alert('请选择订单类型');
+      return;
+    }
     
     // 准备提交数据
-    const submitData = prepareSubmitData(table.rows);
-    console.log('提交当前订单数据:', {
-      tableId: table.id,
-      customer: table.metadata.customerId,
-      restaurant: table.metadata.restaurantId,
-      orderType: table.metadata.orderTypeId,
-      date: table.metadata.date,
-      items: submitData,
-    });
+    const items = prepareSubmitData(table.rows);
+    const submitPayload = {
+      partnerId: table.metadata.customerId,
+      restaurantId: table.metadata.restaurantId,
+      orderTypeId: table.metadata.orderTypeId,
+      date: table.metadata.date?.split('T')[0] || new Date().toISOString().split('T')[0], // YYYY-MM-DD
+      items: items,
+    };
     
-    alert(`当前表格已打包完毕！\n共 ${submitData.length} 条商品\n\n（后端提交服务待对接）`);
+    console.log('提交当前订单数据:', submitPayload);
+    
+    try {
+      // 获取 Token
+      const token = useAuthStore.getState().token;
+      if (!token) {
+        alert('未登录或登录已过期');
+        return;
+      }
+
+      const response = await fetch('/api/order/submit', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(submitPayload)
+      });
+
+      const result = await response.json();
+      
+      if (result.success) {
+        alert(`订单提交成功！\n订单ID: ${result.orderId}\n单号: ${result.tradeNo}`);
+      } else {
+        alert(`提交失败: ${result.message}`);
+      }
+    } catch (error) {
+      console.error('Submit error:', error);
+      alert('提交请求失败，请检查网络');
+    }
+
   }, [table.id, table.metadata, table.rows, openCustomerModal, checkUnprocessedRows, prepareSubmitData]);
 
   // 提交所有订单
-  const handleSubmitAll = useCallback(() => {
+  const handleSubmitAll = useCallback(async () => {
     if (!table.metadata.customerId) {
       openCustomerModal(table.id);
       return;
@@ -619,21 +658,57 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
       return;
     }
     
-    // 准备所有表格的提交数据
-    const allSubmitData = Object.values(tables).map((t) => ({
-      tableId: t.id,
-      tableTitle: t.title,
-      customer: t.metadata.customerId,
-      restaurant: t.metadata.restaurantId,
-      orderType: t.metadata.orderTypeId,
-      date: t.metadata.date,
-      items: prepareSubmitData(t.rows),
-    }));
+    // 逐个提交（串行，避免并发问题）
+    let successCount = 0;
+    let failCount = 0;
+    const token = useAuthStore.getState().token;
     
-    const totalItems = allSubmitData.reduce((sum, t) => sum + t.items.length, 0);
-    console.log('提交所有订单数据:', allSubmitData);
+    if (!token) {
+        alert('未登录或登录已过期');
+        return;
+    }
+
+    for (const t of Object.values(tables)) {
+        // 简单校验元数据
+        if (!t.metadata.restaurantId || !t.metadata.orderTypeId) {
+            alert(`表格 ${t.title || t.id} 缺少餐厅或订单类型，跳过提交`);
+            failCount++;
+            continue;
+        }
+
+        const items = prepareSubmitData(t.rows);
+        const submitPayload = {
+            partnerId: t.metadata.customerId,
+            restaurantId: t.metadata.restaurantId,
+            orderTypeId: t.metadata.orderTypeId,
+            date: t.metadata.date?.split('T')[0] || new Date().toISOString().split('T')[0],
+            items: items,
+        };
+
+        try {
+            const response = await fetch('/api/order/submit', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify(submitPayload)
+            });
+            const result = await response.json();
+            if (result.success) {
+                successCount++;
+            } else {
+                console.error(`表格 ${t.title} 提交失败:`, result.message);
+                failCount++;
+            }
+        } catch (e) {
+            console.error(`表格 ${t.title} 提交异常:`, e);
+            failCount++;
+        }
+    }
     
-    alert(`所有表格已打包完毕！\n共 ${allSubmitData.length} 个表格，${totalItems} 条商品\n\n（后端提交服务待对接）`);
+    alert(`批量提交完成\n成功: ${successCount}\n失败: ${failCount}`);
+
   }, [table.id, table.metadata.customerId, tables, openCustomerModal, checkUnprocessedRows, prepareSubmitData]);
 
   // 获取餐厅和订单类型列表（现在是全局列表，不再按客户分组）
