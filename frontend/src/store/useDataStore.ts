@@ -47,8 +47,8 @@ interface DataState {
   
   // Actions
   loadPartners: () => Promise<void>;
-  loadRestaurants: () => Promise<void>;
-  loadOrderTypes: () => Promise<void>;
+  loadRestaurants: (partnerId?: string) => Promise<void>;
+  loadOrderTypes: (partnerId?: string) => Promise<void>;
   syncProducts: (partnerId: string) => Promise<boolean>;
   setSelectedPartner: (partnerId: string | null) => void;
   setSyncStatus: (syncing: boolean, message?: string, progress?: number) => void;
@@ -87,9 +87,13 @@ export const useDataStore = create<DataState>((set) => ({
     }
   },
   
-  loadRestaurants: async () => {
+  loadRestaurants: async (partnerId?: string) => {
     try {
-      const response = await fetch(`${API_BASE}/data/restaurants`, {
+      const url = partnerId 
+        ? `${API_BASE}/data/restaurants?partnerId=${partnerId}`
+        : `${API_BASE}/data/restaurants`;
+        
+      const response = await fetch(url, {
         headers: getAuthHeader(),
       });
       const result = await response.json();
@@ -102,9 +106,13 @@ export const useDataStore = create<DataState>((set) => ({
     }
   },
   
-  loadOrderTypes: async () => {
+  loadOrderTypes: async (partnerId?: string) => {
     try {
-      const response = await fetch(`${API_BASE}/data/order_types`, {
+      const url = partnerId 
+        ? `${API_BASE}/data/order_types?partnerId=${partnerId}`
+        : `${API_BASE}/data/order_types`;
+
+      const response = await fetch(url, {
         headers: getAuthHeader(),
       });
       const result = await response.json();

@@ -18,7 +18,7 @@ import httpx
 from app.core.logger import app_logger as logger
 
 # 远端 API 基础 URL
-REMOTE_API_BASE = "https://api.shian360.com/order_tool"
+REMOTE_API_BASE = "https://api.szst.zjcqq.com/order_tool"
 
 
 @dataclass

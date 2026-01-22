@@ -173,7 +173,7 @@ async def get_partners(authorization: Optional[str] = Header(None)):
 
 
 @router.get("/data/restaurants")
-async def get_restaurants(authorization: Optional[str] = Header(None)):
+async def get_restaurants(partnerId: Optional[str] = None, authorization: Optional[str] = Header(None)):
     """获取餐厅列表"""
     token = extract_token(authorization)
     if not token:
@@ -183,8 +183,17 @@ async def get_restaurants(authorization: Optional[str] = Header(None)):
     if not session:
         raise HTTPException(status_code=401, detail="登录已过期")
     
+    # 构造请求参数
+    params = {"op": "warehouse"}
+    if session.user_type == "supplier":
+        # 配送商登录: 必须指定 purchaser_id (即 partnerId)
+        if not partnerId:
+            # 如果没传 partnerId，可能是在未选择客户的情况下调用，返回空列表而不是报错
+            return {"success": True, "data": []}
+        params["purchaser_id"] = partnerId
+    
     result = await remote_session_manager.request(
-        token, "POST", "/index.php", params={"op": "warehouse"}
+        token, "POST", "/index.php", params=params
     )
     
     if not result or result.get("code") != 0:
@@ -201,7 +210,7 @@ async def get_restaurants(authorization: Optional[str] = Header(None)):
 
 
 @router.get("/data/order_types")
-async def get_order_types(authorization: Optional[str] = Header(None)):
+async def get_order_types(partnerId: Optional[str] = None, authorization: Optional[str] = Header(None)):
     """获取订单类型列表"""
     token = extract_token(authorization)
     if not token:
@@ -211,8 +220,16 @@ async def get_order_types(authorization: Optional[str] = Header(None)):
     if not session:
         raise HTTPException(status_code=401, detail="登录已过期")
     
+    # 构造请求参数
+    params = {"op": "order_type"}
+    if session.user_type == "supplier":
+        # 配送商登录: 必须指定 purchaser_id (即 partnerId)
+        if not partnerId:
+            return {"success": True, "data": []}
+        params["purchaser_id"] = partnerId
+    
     result = await remote_session_manager.request(
-        token, "POST", "/index.php", params={"op": "order_type"}
+        token, "POST", "/index.php", params=params
     )
     
     if not result or result.get("code") != 0:
@@ -249,10 +266,22 @@ async def sync_products(req: SyncRequest, authorization: Optional[str] = Header(
     logger.info(f"[SyncProducts] Starting sync for partner {req.partnerId}")
     
     # 调用远端 API 获取商品列表
+    params = {"op": "goods"}
+    data = {}
+    
+    if session.user_type == "purchaser":
+        # 学校登录: partnerId 是 配送商 (supplier_id)
+        data["supplier_id"] = req.partnerId
+    else:
+        # 配送商登录: partnerId 是 学校 (purchaser_id)
+        params["purchaser_id"] = req.partnerId
+        # 注意：这里可能需要同时把 supplier_id 设为自己(session.genus_id)或者不传
+        # 根据文档，配送商登录时，purchaser_id 必填
+    
     result = await remote_session_manager.request(
         token, "POST", "/index.php", 
-        params={"op": "goods"},
-        data={"supplier_id": req.partnerId}
+        params=params,
+        data=data
     )
     
     if not result or result.get("code") != 0:

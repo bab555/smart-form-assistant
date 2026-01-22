@@ -101,7 +101,8 @@ def _parse_excel(file_bytes: bytes, filename: str) -> str:
                 if truncated:
                     txt += f"\n\n（Sheet {sname} 已截断，仅展示前 200 行）"
 
-                parts.append(f"### Sheet: {sname}\n{txt}\n")
+                # 移除 "### Sheet: name" 标题，直接拼接内容，使其与 Word 格式完全一致
+                parts.append(f"{txt}\n")
 
             if not parts:
                 return "Excel 读取失败: 所有工作表均为空"

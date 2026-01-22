@@ -217,15 +217,26 @@ class SimpleAgent:
 2. **内容解析**：
    - 识别“食谱”：如“红烧肉”，需拆解为食材（五花肉、酱油等）。
    - 识别“口语”：如“明天要十斤土豆”，提取为 {"识别商品": "土豆", "数量": 10, "单位": "斤"}。
+   - **表格数据**：如果输入是 Markdown 表格，请逐行提取数据。
 3. **合并同类项**：相同商品请合并数量。
+
+【One-Shot Example (示例)】
+输入文件内容:
+| 商品名称 | 数量 | 单位 |
+| --- | --- | --- |
+| 土豆 | 10 | 斤 |
+| 西红柿 | 5 | 斤 |
+
+输出 JSON Lines:
+{"__new_table__": "新表格"}
+{"识别商品": "土豆", "数量": 10, "单位": "斤", "规格": "", "备注": ""}
+{"识别商品": "西红柿", "数量": 5, "单位": "斤", "规格": "", "备注": ""}
 
 【输出格式】
 严格使用 JSON Lines 格式，每行一个对象：
-
 1. 新建表格：{"__new_table__": "表名（如：1月1日张三）"}
 2. 添加商品：{"识别商品": "xx", "数量": 1, "单位": "xx", "规格": "xx", "备注": ""}
-
-注意：备注字段必须留空("")，由用户自行填写。
+3. 注意：备注字段必须留空("")，由用户自行填写。
 """
         else:
             # 场景 B: 对话/操作 (Chat / Edit)
@@ -267,14 +278,14 @@ class SimpleAgent:
             {"role": "user", "content": content_to_process}
         ]
 
-        # 流式调用（不带 tools）
+        # 流式调用（不带 tools，禁用 thinking 以避免 Excel 密集数据导致的输出中断）
         yield {"type": "state", "state": "processing"}
         
         try:
             stream = llm_service.stream_chat_with_thinking(
                 messages=messages,
                 tools=None,  # 不使用 Function Calling
-                thinking_budget=200
+                thinking_budget=0  # 禁用思考模式
             )
 
             # 数据收集：支持多表格

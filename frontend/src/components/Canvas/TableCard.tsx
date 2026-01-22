@@ -118,6 +118,9 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   const partners = useDataStore((state) => state.partners);
   const restaurants = useDataStore((state) => state.restaurants);
   const orderTypes = useDataStore((state) => state.orderTypes);
+  const loadRestaurants = useDataStore((state) => state.loadRestaurants);
+  const loadOrderTypes = useDataStore((state) => state.loadOrderTypes);
+  const syncProducts = useDataStore((state) => state.syncProducts);
   
   // 右键菜单状态
   const [contextMenu, setContextMenu] = useState<{ isOpen: boolean; x: number; y: number }>({
@@ -502,7 +505,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   }, [table, openCustomerModal]);
 
   // 元数据变更
-  const handleClientChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+  const handleClientChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
     const clientId = e.target.value;
     const client = partners.find(c => c.id === clientId);
     // 选择客户后，清空餐厅和订单类型
@@ -514,6 +517,17 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
       orderTypeId: '',
       orderType: '',
     });
+
+    // 如果是配送商模式（需要选择客户），选择客户后重新加载关联数据
+    if (clientId) {
+        // 并行加载
+        void loadRestaurants(clientId);
+        void loadOrderTypes(clientId);
+        // 自动触发商品库同步（或者检查是否需要同步）
+        // 这里为了简化流程，自动触发同步（或者可以加个按钮让用户点）
+        // 考虑到用户抱怨"商品库没有取到"，这里自动同步一下比较保险
+        void syncProducts(clientId);
+    }
   };
 
   const handleRestaurantChange = (e: React.ChangeEvent<HTMLSelectElement>) => {

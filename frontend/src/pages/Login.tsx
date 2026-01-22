@@ -23,9 +23,6 @@ export const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
   const { login, isLoading } = useAuthStore();
   const { 
     loadPartners, 
-    loadRestaurants, 
-    loadOrderTypes, 
-    syncProducts,
     syncMessage,
     syncProgress,
   } = useDataStore();
@@ -36,19 +33,10 @@ export const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
     
     try {
       // 1. 加载基础数据
-      await Promise.all([
-        loadPartners(),
-        loadRestaurants(),
-        loadOrderTypes(),
-      ]);
+      await loadPartners();
       
-      // 2. 如果有合作方，同步商品库
-      const currentPartners = useDataStore.getState().partners;
-      if (currentPartners.length > 0) {
-        const firstPartnerId = currentPartners[0].id;
-        useDataStore.getState().setSelectedPartner(firstPartnerId);
-        await syncProducts(firstPartnerId);
-      }
+      // 注意：餐厅、订单类型、商品库现在都改为在主界面选择客户后触发加载
+      // 避免配送商登录后因未选客户而拉取失败
       
       // 完成
       setTimeout(() => {

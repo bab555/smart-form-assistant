@@ -6,7 +6,7 @@
 ## Base URL
 
 ```
-https://api.shian360.com/order_tool/
+https://api.szst.zjcqq.com/order_tool/
 ```
 
 ## 认证方式
