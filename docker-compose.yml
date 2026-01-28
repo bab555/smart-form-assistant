@@ -6,7 +6,7 @@ services:
     container_name: smart-form-backend
     restart: always
     ports:
-      - "8000:8000"
+      - "8151:8000"
     env_file:
       - ./backend/.env
     volumes:
@@ -20,7 +20,7 @@ services:
     container_name: smart-form-frontend
     restart: always
     ports:
-      - "80:80"
+      - "8152:80"
     depends_on:
       - backend
     networks:
