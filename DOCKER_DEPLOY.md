@@ -1,73 +1,82 @@
-# Docker 部署指南
+# 🐳 Docker 部署指南
 
-本项目支持使用 Docker Compose 一键部署，包含前端（Nginx 托管）和后端（FastAPI）。
+本指南将帮助你使用 Docker 快速部署 **智能订单助手**。
 
-## 1. 准备工作
+## 前置要求
 
-### 获取代码
-如果你是通过 Git 拉取的代码，直接进入项目根目录：
-```bash
-git clone https://github.com/bab555/smart-form-assistant.git
-cd smart-form-assistant
-```
+- Docker (20.10+)
+- Docker Compose (v2.0+)
 
-### 配置 API Key
-由于 API Key 是敏感信息，默认配置文件名为 `.env.example`。你需要将其重命名为 `.env` 才能生效。
+## 🚀 快速启动
 
-**操作步骤：**
-1. 进入 `backend` 目录
-2. 将 `.env.example` 复制或重命名为 `.env`
+### 1. 配置环境变量
 
-**Windows (PowerShell):**
-```powershell
-cd backend
-cp .env.example .env
-cd ..
-```
+首先，复制示例配置文件：
 
-**Linux / Mac:**
 ```bash
 cd backend
 cp .env.example .env
-cd ..
 ```
 
-> **注意**：`.env.example` 中已经包含了可用的阿里云 API Key，直接复制即可使用，无需修改内容。
+然后编辑 `.env` 文件，填入必要的 API Key（阿里云 Qwen）：
 
-## 2. 启动服务
+```ini
+# .env 文件
+DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxx
+```
 
-在项目根目录下，运行以下命令：
+### 2. 启动服务
+
+在项目根目录下执行：
+
+```bash
+# 构建并启动（后台运行）
+docker-compose up --build -d
+```
+
+### 3. 访问应用
+
+- **前端页面**: http://localhost
+- **后端 API**: http://localhost:8000/docs
+
+---
+
+## 📂 数据持久化
+
+Docker 配置中已预设了数据卷挂载，以下数据会持久化保存在宿主机项目目录下：
+
+| 宿主机目录 | 容器内路径 | 说明 |
+|-----------|------------|------|
+| `./data/` | `/app/data/` | 向量数据库索引、用户偏好设置 |
+| `./uploads/` | `/app/uploads/` | 上传的文件 |
+
+**注意**：请定期备份 `./data` 目录。
+
+---
+
+## 🛠️ 常用命令
+
+```bash
+# 查看日志
+docker-compose logs -f
+
+# 查看日志 (只看后端)
+docker-compose logs -f backend
+
+# 重启服务
+docker-compose restart
+
+# 停止服务
+docker-compose down
+
+# 清理所有数据（慎用！）
+docker-compose down -v
+```
+
+## 🔄 更新部署
+
+当你修改了代码后，执行以下命令重新构建并启动：
 
 ```bash
 docker-compose up --build -d
 ```
-
-该命令会自动执行以下操作：
-1. 构建后端镜像（基于 Python 3.12，安装依赖）
-2. 构建前端镜像（基于 Node.js 编译，Nginx 托管）
-3. 启动并编排两个容器
-
-## 3. 访问应用
-
-启动完成后，打开浏览器访问：
-
-**http://localhost**
-
-* 前端页面：80 端口
-* 后端 API：内部自动代理到 8000 端口，无需单独访问
-
-## 4. 常用命令
-
-* **停止服务**：
-  ```bash
-  docker-compose down
-  ```
-* **查看日志**：
-  ```bash
-  docker-compose logs -f
-  ```
-* **重新构建**（当代码有更新时）：
-  ```bash
-  docker-compose up --build -d
-  ```
-

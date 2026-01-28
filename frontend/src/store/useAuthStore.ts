@@ -20,6 +20,7 @@ interface AuthState {
   
   // Actions
   login: (username: string, password: string, remember: boolean) => Promise<boolean>;
+  loginWithToken: (token: string) => Promise<boolean>;
   logout: () => Promise<void>;
   checkAuth: () => Promise<boolean>;
   setLoading: (loading: boolean) => void;
@@ -70,6 +71,41 @@ export const useAuthStore = create<AuthState>()(
           console.error('Login error:', error);
           set({ isLoading: false });
           return false;
+        }
+      },
+
+      loginWithToken: async (token: string) => {
+        set({ isLoading: true });
+        try {
+          const response = await fetch(`${API_BASE}/auth/sso`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token }),
+          });
+          
+          const result = await response.json();
+          
+          if (result.success && result.data) {
+             set({
+              isLoggedIn: true,
+              user: {
+                userType: result.data.userType,
+                userId: result.data.userId,
+                genusId: result.data.genusId,
+                name: result.data.name,
+              },
+              token: result.data.token,
+              isLoading: false,
+            });
+            return true;
+          } else {
+            set({ isLoading: false });
+            return false;
+          }
+        } catch (error) {
+           console.error('SSO Login error:', error);
+           set({ isLoading: false });
+           return false;
         }
       },
       

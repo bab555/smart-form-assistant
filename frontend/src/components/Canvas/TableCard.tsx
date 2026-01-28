@@ -23,6 +23,18 @@ import { ContextMenu, MenuItem } from './ContextMenu';
 import { wsClient } from '@/services/websocket';
 import './TableCard.css';
 
+// 商品数据接口
+interface ProductItem {
+  id: string;
+  name: string;
+  spec: string;
+  unit: string;
+  category: string;
+  price: string;
+  pinyin?: string; // 全拼
+  py?: string;     // 简拼
+}
+
 // 格式化日期为 datetime-local 输入框格式
 const formatDateTimeLocal = (date: Date): string => {
   const year = date.getFullYear();
@@ -141,9 +153,13 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     mode: 'edit' | 'add';
   }>({ isOpen: false, rowIndex: -1, mode: 'edit' });
 
-  // 商品库名称列表（全量）
-  const [productNames, setProductNames] = useState<string[]>([]);
-  const [productNamesLoading, setProductNamesLoading] = useState(false);
+  // 商品库全量数据
+  const [products, setProducts] = useState<ProductItem[]>([]);
+  const [categories, setCategories] = useState<string[]>([]);
+  const [activeCategory, setActiveCategory] = useState<string>('全部');
+  const [productsLoading, setProductsLoading] = useState(false);
+  
+  // 搜索关键字
   const [productSearch, setProductSearch] = useState('');
 
   // 偏好编辑弹窗
@@ -152,55 +168,70 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   const [preferencesLoading, setPreferencesLoading] = useState(false);
   const [preferenceSearch, setPreferenceSearch] = useState('');
 
-  const normalize = useCallback((s: string) => s.trim().toLowerCase().replace(/\s+/g, ''), []);
-
-  const fuzzyScore = useCallback((text: string, query: string) => {
-    // 简单模糊匹配评分：
-    // - 完全相等：1000
-    // - 包含：700 - index
-    // - 子序列匹配（按顺序包含每个字符）：最多 500 - gap
-    const t = normalize(text);
-    const q = normalize(query);
-    if (!q) return 1;
-    if (t === q) return 1000;
-    const idx = t.indexOf(q);
-    if (idx >= 0) return 700 - Math.min(idx, 200);
-
-    // 子序列
-    let ti = 0;
-    let matched = 0;
-    let first = -1;
-    let last = -1;
-    for (let qi = 0; qi < q.length; qi++) {
-      const ch = q[qi];
-      let found = false;
-      while (ti < t.length) {
-        if (t[ti] === ch) {
-          found = true;
-          if (first < 0) first = ti;
-          last = ti;
-          ti += 1;
-          break;
-        }
-        ti += 1;
+  // 获取商品库（新接口）
+  const ensureProductsLoaded = useCallback(async () => {
+    // 只有在已选择客户且列表为空时才加载
+    if (products.length > 0 || productsLoading || !table.metadata.customerId) return;
+    
+    setProductsLoading(true);
+    try {
+      const resp = await fetch(`/api/data/products?partnerId=${table.metadata.customerId}`, {
+          headers: {
+              'Authorization': `Bearer ${useAuthStore.getState().token}`
+          }
+      });
+      if (!resp.ok) throw new Error('获取商品库失败');
+      
+      const result = await resp.json();
+      if (result.success && Array.isArray(result.data)) {
+        const list = result.data as ProductItem[];
+        setProducts(list);
+        
+        // 提取分类
+        const cats = Array.from(new Set(list.map(p => p.category || '未分类'))).sort();
+        setCategories(['全部', ...cats]);
       }
-      if (!found) return 0;
-      matched += 1;
+    } catch (err) {
+      console.error('加载商品库错误:', err);
+    } finally {
+      setProductsLoading(false);
     }
-    const span = first >= 0 && last >= 0 ? (last - first + 1) : 9999;
-    const gaps = span - matched;
-    return Math.max(0, 500 - Math.min(gaps, 500));
-  }, [normalize]);
+  }, [products.length, productsLoading, table.metadata.customerId]);
 
-  const filteredProductNames = useMemo(() => {
-    const q = productSearch.trim();
-    if (!q) return productNames.slice(0, 500);
-    const scored = productNames
-      .map((name) => ({ name, score: fuzzyScore(name, q) }))
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score || a.name.length - b.name.length);
-    return scored.slice(0, 500).map((x) => x.name);
-  }, [productNames, productSearch, fuzzyScore]);
+  // 打开弹窗时加载
+  const openProductPicker = useCallback((rowIndex: number, mode: 'edit' | 'add' = 'edit') => {
+    if (!table.metadata.customerId) {
+        openCustomerModal(table.id);
+        return;
+    }
+    setProductSearch('');
+    setActiveCategory('全部');
+    setProductPickerState({ isOpen: true, rowIndex, mode });
+    void ensureProductsLoaded();
+  }, [table.metadata.customerId, table.id, openCustomerModal, ensureProductsLoaded]);
+
+  // 过滤逻辑：同时支持分类 + 搜索 (名称/拼音/简拼)
+  const filteredProducts = useMemo(() => {
+    let list = products;
+    
+    // 1. 分类筛选
+    if (activeCategory !== '全部') {
+        list = list.filter(p => (p.category || '未分类') === activeCategory);
+    }
+    
+    // 2. 关键词搜索
+    const q = productSearch.trim().toLowerCase();
+    if (q) {
+        list = list.filter(p => {
+            const name = p.name.toLowerCase();
+            const py = (p.py || '').toLowerCase();
+            const pinyin = (p.pinyin || '').toLowerCase();
+            return name.includes(q) || py.includes(q) || pinyin.includes(q);
+        });
+    }
+    
+    return list.slice(0, 200); // 限制显示数量，避免渲染卡顿
+  }, [products, activeCategory, productSearch]);
 
   // 时间输入框是否正在编辑（用户操作期间停止自动同步）
   const isEditingTimeRef = useRef<boolean>(false);
@@ -287,29 +318,6 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
 
   const closeApplyModal = useCallback(() => setApplyingRowIndex(null), []);
 
-  // 打开商品选择弹窗（点击感叹号）
-  const ensureProductNamesLoaded = useCallback(async () => {
-    if (productNames.length > 0 || productNamesLoading) return;
-    setProductNamesLoading(true);
-    try {
-      const resp = await fetch('/api/products/names');
-      if (!resp.ok) throw new Error('获取商品库失败');
-      const names = await resp.json();
-      if (Array.isArray(names)) setProductNames(names.map((x) => String(x)));
-    } catch {
-      // ignore: modal 内提示
-      setProductNames([]);
-    } finally {
-      setProductNamesLoading(false);
-    }
-  }, [productNames.length, productNamesLoading]);
-
-  const openProductPicker = useCallback((rowIndex: number, mode: 'edit' | 'add' = 'edit') => {
-    setProductSearch('');
-    setProductPickerState({ isOpen: true, rowIndex, mode });
-    void ensureProductNamesLoaded();
-  }, [ensureProductNamesLoaded]);
-
   // 添加新商品（打开商品选择弹窗）
   const handleAddProduct = useCallback((e?: React.MouseEvent) => {
     e?.stopPropagation();
@@ -394,38 +402,36 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   }, [preferences, preferenceSearch]);
 
   // 选择商品（商品选择弹窗中用户选择后）
-  const handleProductSelect = useCallback((selectedProduct: string) => {
+  const handleProductSelect = useCallback((product: ProductItem) => {
     const { rowIndex, mode } = productPickerState;
+    const selectedProduct = product.name;
     
     if (mode === 'add') {
       // 新增商品模式：添加一行新数据
-      // 计算新的序号（当前最大序号 + 1）
       const maxSeq = table.rows.reduce((max, row) => {
         const seq = Number(row['序号']) || 0;
         return Math.max(max, seq);
       }, 0);
       
-      // 创建新行（序号、识别商品、订单商品 填入选择的商品名）
       const newRow: Record<string, unknown> = {
         '序号': maxSeq + 1,
         '识别商品': selectedProduct,
         '订单商品': selectedProduct,
         '数量': 1,
-        '单位': '',
-        '规格': '',
+        '单位': product.unit, // 自动填入单位
+        '规格': product.spec, // 自动填入规格
         '备注': '',
         __order_status: 'exact',
-        __order_candidates: [],
-        __order_selected: '',
-        __goods_id: '', // 初始化为空，等待后端返回
+        __goods_id: product.id, // 填入商品ID
       };
       
       addRow(table.id, newRow);
       
-      // 同时请求后端获取该商品的规格/单位信息
+      // 不再需要请求后端，因为我们已经有完整信息了
+      // 但为了记录偏好，还是发送一次
       wsClient.send('apply_order_product', {
         table_id: table.id,
-        row_index: table.rows.length, // 新行的索引
+        row_index: table.rows.length, 
         mode: 'A',
         recognized: selectedProduct,
         selected: selectedProduct,
@@ -439,7 +445,11 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
       const row = table.rows[rowIndex] as any;
       const recognized = (row?.['识别商品'] || '').toString();
       
-      // 发送请求，让后端覆盖 订单商品、规格、单位 + 记录偏好
+      // 更新行数据 (乐观更新)
+      updateCell(table.id, rowIndex, '订单商品', selectedProduct);
+      updateCell(table.id, rowIndex, '单位', product.unit);
+      updateCell(table.id, rowIndex, '规格', product.spec);
+      
       wsClient.send('apply_order_product', {
         table_id: table.id,
         row_index: rowIndex,
@@ -452,7 +462,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
     }
     
     closeProductPicker();
-  }, [productPickerState, table.id, table.metadata.customerId, table.rows, closeProductPicker, addRow]);
+  }, [productPickerState, table.id, table.metadata.customerId, table.rows, closeProductPicker, addRow, updateCell]);
 
   const confirmApplyOrder = useCallback(async (mode: 'A' | 'B' | 'C') => {
     if (applyingRowIndex === null) return;
@@ -524,8 +534,6 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
         void loadRestaurants(clientId);
         void loadOrderTypes(clientId);
         // 自动触发商品库同步（或者检查是否需要同步）
-        // 这里为了简化流程，自动触发同步（或者可以加个按钮让用户点）
-        // 考虑到用户抱怨"商品库没有取到"，这里自动同步一下比较保险
         void syncProducts(clientId);
     }
   };
@@ -925,48 +933,81 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
       {productPickerState.isOpen && (
         <div className="confirm-modal-overlay product-picker-overlay">
           <div className="confirm-modal-backdrop" onClick={closeProductPicker} />
-        <div className="product-picker-modal large">
+          <div className="product-picker-modal large">
             <div className="confirm-header">
-              <Plus size={20} className="icon-primary" />
-              <span>{productPickerState.mode === 'add' ? '添加新商品' : '选择商品'}</span>
+              <div className="header-title-row">
+                <Plus size={20} className="icon-primary" />
+                <span>{productPickerState.mode === 'add' ? '添加新商品' : '选择商品'}</span>
+              </div>
+              <div className="search-bar-wrapper">
+                <input
+                  className="picker-search"
+                  placeholder="输入名称或拼音搜索 (如 qing -> 青菜)..."
+                  value={productSearch}
+                  onChange={(e) => setProductSearch(e.target.value)}
+                  autoFocus
+                />
+              </div>
             </div>
-            <div className="product-picker-body">
-              <p className="picker-hint">
-                {productPickerState.mode === 'add' 
-                  ? '从商品库中选择要添加的商品，选择后自动添加一行：' 
-                  : '从完整商品库中搜索并选择正确的商品：'}
-              </p>
-              <input
-                className="picker-search"
-                placeholder="搜索商品名..."
-                value={productSearch}
-                onChange={(e) => setProductSearch(e.target.value)}
-              />
-              {productNamesLoading ? (
-                <div className="picker-loading">加载商品库中...</div>
-              ) : filteredProductNames.length === 0 ? (
-                <div className="product-empty">没有匹配到商品，请换个关键词试试</div>
-              ) : (
-                <div className="product-grid">
-                  {filteredProductNames.map((product, index) => (
-                    <button
-                      key={`${product}_${index}`}
-                      className="product-chip"
-                      onClick={() => handleProductSelect(product)}
-                      title={product}
-                    >
-                      {product}
-                    </button>
-                  ))}
-                </div>
-              )}
-              <p className="picker-note">
-                {productPickerState.mode === 'add' 
-                  ? '选择后将自动添加一行新商品（自动递增序号）。' 
-                  : '选择后将自动覆盖「识别商品」「规格」「单位」并记录偏好。'}
-              </p>
+            
+            <div className="product-picker-content">
+              {/* 左侧分类侧边栏 */}
+              <div className="category-sidebar">
+                {categories.map(cat => (
+                  <div 
+                    key={cat} 
+                    className={`category-item ${activeCategory === cat ? 'active' : ''}`}
+                    onClick={() => setActiveCategory(cat)}
+                  >
+                    {cat}
+                  </div>
+                ))}
+              </div>
+
+              {/* 右侧商品列表 */}
+              <div className="product-list-container">
+                {productsLoading ? (
+                  <div className="picker-loading">
+                    <Loader2 className="streaming-indicator" size={24} />
+                    <span>加载商品库中...</span>
+                  </div>
+                ) : filteredProducts.length === 0 ? (
+                  <div className="product-empty">
+                    <AlertCircle size={32} />
+                    <p>没有找到相关商品</p>
+                    <p className="sub-hint">尝试输入拼音首字母，如 "jd" 找 "鸡蛋"</p>
+                  </div>
+                ) : (
+                  <div className="product-table-view">
+                    <div className="product-table-header">
+                      <span className="col-name">商品名称</span>
+                      <span className="col-spec">规格</span>
+                      <span className="col-unit">单位</span>
+                      <span className="col-price">参考价</span>
+                    </div>
+                    <div className="product-table-body">
+                      {filteredProducts.map((product) => (
+                        <div
+                          key={product.id}
+                          className="product-table-row"
+                          onClick={() => handleProductSelect(product)}
+                        >
+                          <span className="col-name">{product.name}</span>
+                          <span className="col-spec">{product.spec || '-'}</span>
+                          <span className="col-unit">{product.unit || '-'}</span>
+                          <span className="col-price">{product.price ? `¥${product.price}` : '-'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
+            
             <div className="confirm-footer">
+              <div className="footer-hint">
+                已加载 {products.length} 个商品，当前显示 {filteredProducts.length} 个
+              </div>
               <button className="btn-cancel" onClick={closeProductPicker}>取消</button>
             </div>
           </div>

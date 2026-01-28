@@ -109,6 +109,86 @@ class RemoteSessionManager:
             await client.aclose()
             return None
     
+    async def login_by_token(self, remote_token: str) -> Optional[Dict[str, Any]]:
+        """
+        SSO 登录：使用远端 access_token 换取用户信息
+        
+        注意：需要远端 API 支持通过 token 获取用户信息
+        """
+        # 创建新的 HTTP Client
+        client = httpx.AsyncClient(timeout=30.0)
+        
+        try:
+            # SSO 登录：直接调用远端 login.php，但参数改为 access_token
+            # 根据用户需求：
+            # 1. 接口不变 (login.php?op=set)
+            # 2. Body 从 {username, password} 改为 {access_token: token}
+            
+            response = await client.post(
+                f"{REMOTE_API_BASE}/login.php",
+                params={"op": "set"},
+                data={"access_token": remote_token}
+            )
+            
+            try:
+                result = response.json()
+                logger.info(f"[RemoteSession] SSO Login response: {result}")
+            except Exception as json_err:
+                logger.error(f"[RemoteSession] SSO Login JSON error: {json_err}, text: {response.text}")
+                await client.aclose()
+                return None
+
+            if result.get("code") != 0:
+                logger.warning(f"[RemoteSession] SSO Login failed: {result.get('message')}")
+                await client.aclose()
+                return None
+            
+            data = result.get("data", {})
+            
+            # 提取用户信息（兼容之前的结构）
+            # 注意：实际 API 返回字段可能不同，这里假设与普通登录返回一致
+            user_type = data.get("type", "")
+            user_id = data.get("user_id", "")
+            
+            if not user_id:
+                logger.error("[RemoteSession] SSO Login successful but no user_id returned")
+                await client.aclose()
+                return None
+
+            # 生成本地 token
+            # 注意：SSO 场景下，我们可以直接用传入的 token 作为 key，或者重新生成
+            # 为了安全和一致性，我们还是生成一个新的 local_token
+            local_token = self._generate_local_token(f"sso_{user_id}")
+            
+            # 创建会话
+            session = UserSession(
+                user_type=user_type,
+                user_id=user_id,
+                genus_id=data.get("genus_id", ""),
+                name=data.get("name", ""),
+                access_token=remote_token, # 保存传入的 token
+                local_token=local_token,
+                http_client=client,
+            )
+            
+            async with self._lock:
+                self._sessions[local_token] = session
+            
+            logger.info(f"[RemoteSession] SSO Login success: {session.name} ({session.user_type})")
+            
+            return {
+                "userType": session.user_type,
+                "userId": session.user_id,
+                "genusId": session.genus_id,
+                "name": session.name,
+                "token": local_token,
+            }
+            
+        except Exception as e:
+            logger.error(f"[RemoteSession] SSO Login error: {e}")
+            await client.aclose()
+            return None
+
     async def logout(self, token: str) -> bool:
         """用户登出"""
         async with self._lock:

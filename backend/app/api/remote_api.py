@@ -29,6 +29,10 @@ class LoginRequest(BaseModel):
     remember: bool = False
 
 
+class SSOLoginRequest(BaseModel):
+    token: str
+
+
 class LoginResponse(BaseModel):
     success: bool
     data: Optional[Dict[str, Any]] = None
@@ -85,6 +89,23 @@ async def login(req: LoginRequest):
         return LoginResponse(success=True, data=result)
     else:
         return LoginResponse(success=False, message="用户名或密码错误")
+
+
+@router.post("/auth/sso", response_model=LoginResponse)
+async def sso_login(req: SSOLoginRequest):
+    """
+    SSO 登录接口
+    前端 iframe 收到 token 后调用此接口
+    """
+    if not req.token:
+        return LoginResponse(success=False, message="Token 不能为空")
+        
+    result = await remote_session_manager.login_by_token(req.token)
+    
+    if result:
+        return LoginResponse(success=True, data=result)
+    else:
+        return LoginResponse(success=False, message="Token 验证失败或已过期")
 
 
 @router.post("/auth/logout")
@@ -245,7 +266,94 @@ async def get_order_types(partnerId: Optional[str] = None, authorization: Option
     return {"success": True, "data": order_types}
 
 
-@router.post("/data/sync_products")
+from pypinyin import lazy_pinyin, Style
+
+# ... 之前的代码 ...
+
+# 简单的内存缓存：partner_id -> {timestamp, data}
+_products_cache = {}
+
+@router.get("/data/products")
+async def get_products_list(partnerId: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    """
+    获取商品全量列表（带分类和拼音）
+    用于前端商品选择器
+    """
+    token = extract_token(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="未登录")
+    
+    session = remote_session_manager.get_session(token)
+    if not session:
+        raise HTTPException(status_code=401, detail="登录已过期")
+        
+    # 确定目标 partnerId
+    target_id = partnerId
+    if session.user_type == "supplier":
+        # 配送商登录，必须指定学校 ID
+        if not target_id:
+             return {"success": True, "data": []}
+    elif session.user_type == "purchaser":
+        # 学校登录，如果没有指定 partnerId，则尝试使用默认的供应商（如果有的话，或者直接返回空）
+        # 这里逻辑简化：学校必须选一个供应商才能看商品
+        if not target_id:
+             return {"success": True, "data": []}
+
+    # 检查缓存 (有效期 5 分钟)
+    import time
+    cache_key = f"{session.genus_id}_{target_id}"
+    now = time.time()
+    if cache_key in _products_cache:
+        cached = _products_cache[cache_key]
+        if now - cached["timestamp"] < 300: # 5分钟
+            return {"success": True, "data": cached["data"]}
+
+    # 调用远端 API
+    params = {"op": "goods"}
+    data = {}
+    
+    if session.user_type == "purchaser":
+        data["supplier_id"] = target_id
+    else:
+        params["purchaser_id"] = target_id
+    
+    result = await remote_session_manager.request(
+        token, "POST", "/index.php", 
+        params=params,
+        data=data
+    )
+    
+    if not result or result.get("code") != 0:
+        return {"success": False, "data": [], "message": "获取失败"}
+        
+    # 处理数据：添加拼音
+    products = []
+    for item in result.get("data", []):
+        name = item.get("name", "")
+        # 生成简拼 (szst) 和 全拼 (shuzhishitang)
+        # lazy_pinyin 返回 ['shu', 'zhi']
+        full_pinyin = "".join(lazy_pinyin(name))
+        first_letters = "".join([p[0] for p in lazy_pinyin(name, style=Style.FIRST_LETTER)])
+        
+        products.append({
+            "id": str(item.get("goods_id", "")),
+            "name": name,
+            "spec": item.get("spec", ""),
+            "unit": item.get("unit", ""),
+            "category": item.get("category_name", "") or "未分类",
+            "price": item.get("price", ""),
+            "pinyin": full_pinyin,
+            "py": first_letters, # 简拼
+        })
+    
+    # 写入缓存
+    _products_cache[cache_key] = {
+        "timestamp": now,
+        "data": products
+    }
+    
+    return {"success": True, "data": products}
+
 async def sync_products(req: SyncRequest, authorization: Optional[str] = Header(None)):
     """
     同步商品库并向量化

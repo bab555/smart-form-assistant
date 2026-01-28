@@ -2,7 +2,7 @@
  * App 入口组件 (订单系统)
  * 
  * 功能：
- * - 登录认证
+ * - SSO 无感登录 (监听 postMessage 或 URL 参数)
  * - 路由守卫
  * - 主应用布局
  */
@@ -14,60 +14,106 @@ import { ToastContainer, useToast } from './components/Toast';
 import { useWebSocketSync } from './hooks/useWebSocketSync';
 import { useAuthStore } from './store/useAuthStore';
 import { useDataStore } from './store/useDataStore';
-import { Login } from './pages/Login';
+// import { Login } from './pages/Login'; // 移除登录页
 import './App.css';
 
 const App: React.FC = () => {
-  const { isLoggedIn, checkAuth, user, logout } = useAuthStore();
+  const { isLoggedIn, checkAuth, user, logout, loginWithToken } = useAuthStore();
   const { reset: resetData } = useDataStore();
   const [isChecking, setIsChecking] = useState(true);
-  const [showApp, setShowApp] = useState(false);
   
   // 初始化 WebSocket 事件同步（仅在登录后）
   useWebSocketSync();
   
   const { toasts, removeToast } = useToast();
   
-  // 检查登录状态
+  // 1. 初始化检查：URL参数 / 本地存储 / postMessage
   useEffect(() => {
-    const check = async () => {
+    const init = async () => {
       setIsChecking(true);
-      const valid = await checkAuth();
-      setIsChecking(false);
       
-      if (valid) {
-        setShowApp(true);
+      // A. 优先检查 URL 参数 (方便调试: ?access_token=xxx)
+      const params = new URLSearchParams(window.location.search);
+      const urlToken = params.get('access_token');
+      
+      if (urlToken) {
+        console.log('[App] Found token in URL, attempting SSO...');
+        const success = await loginWithToken(urlToken);
+        if (success) {
+            // 清除 URL 参数，避免刷新重复提交
+            window.history.replaceState({}, '', window.location.pathname);
+            setIsChecking(false);
+            return;
+        }
       }
+      
+      // B. 检查本地已有登录状态
+      const valid = await checkAuth();
+      if (valid) {
+          console.log('[App] Local session valid');
+      }
+      
+      setIsChecking(false);
     };
     
-    check();
-  }, [checkAuth]);
+    init();
+  }, [checkAuth, loginWithToken]);
   
-  // 登录成功回调
-  const handleLoginSuccess = () => {
-    setShowApp(true);
-  };
+  // 2. 监听 iframe postMessage 消息
+  useEffect(() => {
+    const handleMessage = async (event: MessageEvent) => {
+      // 安全检查：建议校验 event.origin
+      // if (event.origin !== "https://your-parent-site.com") return;
+      
+      const { type, token } = event.data || {};
+      
+      if (type === 'SET_TOKEN' && token) {
+        console.log('[App] Received token via postMessage');
+        setIsChecking(true);
+        await loginWithToken(token);
+        setIsChecking(false);
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [loginWithToken]);
   
   // 登出
   const handleLogout = async () => {
     await logout();
     resetData();
-    setShowApp(false);
+    // 通知父页面已登出 (可选)
+    window.parent.postMessage({ type: 'LOGOUT_SUCCESS' }, '*');
   };
   
-  // 检查中显示加载
+  // 加载中状态
   if (isChecking) {
     return (
       <div className="app-loading">
         <div className="loading-spinner"></div>
-        <p>加载中...</p>
+        <p>正在连接系统...</p>
       </div>
     );
   }
   
-  // 未登录显示登录页
-  if (!isLoggedIn || !showApp) {
-    return <Login onLoginSuccess={handleLoginSuccess} />;
+  // 未登录状态 - 显示提示而不是登录框
+  if (!isLoggedIn) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen bg-gray-50 text-gray-500">
+        <div className="mb-4 text-4xl">🔐</div>
+        <h2 className="text-xl font-medium mb-2">等待授权</h2>
+        <p className="mb-8">请从数智食堂系统进入，或等待授权信息...</p>
+        {/* 开发模式下提供一个模拟入口 (可选) */}
+        {process.env.NODE_ENV === 'development' && (
+           <div className="text-xs text-gray-400 border p-4 rounded bg-white">
+             <p>开发调试：</p>
+             <p>URL添加 ?access_token=TEST_TOKEN</p>
+             <p>或 postMessage: {'{ type: "SET_TOKEN", token: "..." }'}</p>
+           </div>
+        )}
+      </div>
+    );
   }
   
   // 已登录显示主应用

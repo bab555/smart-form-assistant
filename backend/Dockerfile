@@ -5,17 +5,19 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # 设置环境变量
-# PYTHONDONTWRITEBYTECODE=1: 禁止生成 .pyc 文件
-# PYTHONUNBUFFERED=1: 实时输出日志，不缓存
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    # 设置时区为上海
+    TZ=Asia/Shanghai
 
 # 安装系统依赖
 # build-essential: 编译依赖
-# poppler-utils: pdf2image 需要
+# libgl1: 图像处理通用依赖 (OpenCV/Pillow 等可能需要)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    poppler-utils \
+    libgl1 \
+    libglib2.0-0 \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件
@@ -28,9 +30,11 @@ RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua
 # 复制应用代码
 COPY . .
 
+# 创建必要的目录
+RUN mkdir -p /app/uploads /app/data /app/logs
+
 # 暴露端口
 EXPOSE 8000
 
 # 启动命令
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-
