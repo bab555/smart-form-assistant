@@ -196,10 +196,11 @@ class RemoteSessionManager:
         
         if session:
             try:
-                # 调用远端登出接口
+                # 调用远端登出接口（需要携带 access_token）
                 await session.http_client.post(
                     f"{REMOTE_API_BASE}/login.php",
-                    params={"op": "out"}
+                    params={"op": "out"},
+                    data={"access_token": session.access_token} if session.access_token else None
                 )
             except Exception as e:
                 logger.warning(f"[RemoteSession] Logout remote error: {e}")
