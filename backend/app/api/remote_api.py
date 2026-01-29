@@ -354,6 +354,8 @@ async def get_products_list(partnerId: Optional[str] = None, authorization: Opti
     
     return {"success": True, "data": products}
 
+
+@router.post("/data/sync_products")
 async def sync_products(req: SyncRequest, authorization: Optional[str] = Header(None)):
     """
     同步商品库并向量化
