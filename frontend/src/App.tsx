@@ -19,7 +19,7 @@ import './App.css';
 
 const App: React.FC = () => {
   const { isLoggedIn, checkAuth, user, logout, loginWithToken } = useAuthStore();
-  const { reset: resetData } = useDataStore();
+  const { reset: resetData, loadPartners } = useDataStore();
   const [isChecking, setIsChecking] = useState(true);
   
   // 初始化 WebSocket 事件同步（仅在登录后）
@@ -78,6 +78,14 @@ const App: React.FC = () => {
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
   }, [loginWithToken]);
+  
+  // 3. 登录成功后加载基础数据（合作伙伴列表）
+  useEffect(() => {
+    if (isLoggedIn) {
+      console.log('[App] User logged in, loading partners...');
+      loadPartners();
+    }
+  }, [isLoggedIn, loadPartners]);
   
   // 登出
   const handleLogout = async () => {
