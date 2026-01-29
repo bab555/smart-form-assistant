@@ -246,6 +246,12 @@ class RemoteSessionManager:
         try:
             url = f"{REMOTE_API_BASE}{endpoint}"
             
+            # 确保 POST 请求携带 access_token（远端 API 需要此参数进行鉴权）
+            if data is None:
+                data = {}
+            if session.access_token:
+                data["access_token"] = session.access_token
+            
             if method.upper() == "GET":
                 response = await session.http_client.get(url, params=params)
             else:
