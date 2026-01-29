@@ -1,5 +1,5 @@
 """
-文档处理服务 - 支持 Excel/Word/PPT 解析 (PDF 支持已移除)
+文档处理服务 - 支持 Excel/Word/PPT/PDF 解析
 """
 import io
 import base64
@@ -20,7 +20,7 @@ class DocumentService:
         'excel': ['.xlsx', '.xls', '.csv'],
         'word': ['.docx', '.doc'],
         'ppt': ['.pptx', '.ppt'],
-        # 'pdf': ['.pdf'], # PDF 已移除
+        # 'pdf': ['.pdf'],
         'image': ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
     }
     
@@ -74,7 +74,7 @@ class DocumentService:
         try:
             if file_type == 'excel':
                 return await self._extract_from_excel(file_content, filename, template_columns)
-            elif file_type in ['word', 'ppt']:
+            elif file_type in ['word', 'ppt', 'pdf']:
                 return await self._extract_from_document(file_content, filename, file_type, template_columns)
             elif file_type == 'image':
                 return await self._extract_from_image(file_content, filename, template_columns)
@@ -259,7 +259,7 @@ Excel 列名: {excel_columns}
         template_columns: Optional[List[Dict]] = None
     ) -> Dict[str, Any]:
         """
-        从 Word/PPT 提取数据（转图片 -> VL 识别）
+        从 Word/PPT/PDF 提取数据（转图片 -> VL 识别）
         """
         logger.info(f"[文档处理] 开始转换为图片: {filename}")
         
@@ -360,7 +360,9 @@ Excel 列名: {excel_columns}
         images = []
         
         try:
-            if file_type == 'word':
+            if file_type == 'pdf':
+                images = self._pdf_to_images(file_content)
+            elif file_type == 'word':
                 images = await self._word_to_images(file_content, filename)
             elif file_type == 'ppt':
                 images = await self._ppt_to_images(file_content, filename)
@@ -373,6 +375,27 @@ Excel 列名: {excel_columns}
             return await self._fallback_extract_text(file_content, filename, file_type)
         except Exception as e:
             logger.error(f"[文档转换] 转换失败: {str(e)}")
+            raise
+    
+    def _pdf_to_images(self, file_content: bytes) -> List[bytes]:
+        """PDF 转图片"""
+        try:
+            from pdf2image import convert_from_bytes
+            from PIL import Image
+            
+            # 转换 PDF 为图片列表
+            pil_images = convert_from_bytes(file_content, dpi=150, first_page=1, last_page=3)
+            
+            images = []
+            for img in pil_images:
+                img_bytes = io.BytesIO()
+                img.save(img_bytes, format='PNG')
+                images.append(img_bytes.getvalue())
+            
+            return images
+            
+        except Exception as e:
+            logger.error(f"[PDF转换] 失败: {e}")
             raise
     
     async def _word_to_images(self, file_content: bytes, filename: str) -> List[bytes]:
@@ -604,3 +627,4 @@ Excel 列名: {excel_columns}
 
 # 全局单例
 document_service = DocumentService()
+
