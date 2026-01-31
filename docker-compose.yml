@@ -32,13 +32,6 @@ services:
     networks:
       - app-network
 
-volumes:
-  redis_data:
-
-networks:
-  app-network:
-    driver: bridge
-
   frontend:
     build: ./frontend
     container_name: smart-form-frontend
@@ -49,6 +42,9 @@ networks:
       - backend
     networks:
       - app-network
+
+volumes:
+  redis_data:
 
 networks:
   app-network:

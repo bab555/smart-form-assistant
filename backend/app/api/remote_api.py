@@ -117,6 +117,13 @@ async def logout(authorization: Optional[str] = Header(None)):
     return {"success": True}
 
 
+import asyncio
+from functools import partial
+
+# ... imports ...
+
+# ...
+
 @router.get("/auth/check", response_model=LoginResponse)
 async def check_auth(authorization: Optional[str] = Header(None)):
     """检查登录状态"""
@@ -124,7 +131,7 @@ async def check_auth(authorization: Optional[str] = Header(None)):
     if not token:
         return LoginResponse(success=False, message="未登录")
     
-    session = remote_session_manager.get_session(token)
+    session = await remote_session_manager.get_session(token)
     if not session:
         return LoginResponse(success=False, message="登录已过期")
     
@@ -146,14 +153,12 @@ async def check_auth(authorization: Optional[str] = Header(None)):
 async def get_partners(authorization: Optional[str] = Header(None)):
     """
     获取合作方列表
-    - 学校登录：返回配送商列表
-    - 配送商登录：返回学校列表
     """
     token = extract_token(authorization)
     if not token:
         raise HTTPException(status_code=401, detail="未登录")
     
-    session = remote_session_manager.get_session(token)
+    session = await remote_session_manager.get_session(token)
     if not session:
         raise HTTPException(status_code=401, detail="登录已过期")
     
@@ -191,51 +196,66 @@ async def get_partners(authorization: Optional[str] = Header(None)):
     
     # ========== 预加载优化：后台异步加载所有客户的商品库 ==========
     try:
+        # 限制并发数为 5，防止瞬间发起过多请求阻塞系统
+        sem = asyncio.Semaphore(5)
+
         # 辅助函数：单个预加载
         async def preload_one(target_id: str):
-            try:
-                cache_key = f"products:{session.genus_id}:{target_id}"
-                # 如果缓存已存在且较新（例如剩余时间 > 30分钟），则跳过
-                # 但 redis.get 无法看时间，为了简单我们只看是否存在
-                if await redis_manager.get(cache_key):
-                    return 
-                
-                logger.info(f"[Preload] Fetching products for partner {target_id}")
-                # 构造请求
-                p_params = {"op": "goods"}
-                p_data = {}
-                if session.user_type == "purchaser":
-                    p_data["supplier_id"] = target_id
-                else:
-                    p_params["purchaser_id"] = target_id
-                
-                # 注意：request 方法内部使用了 HTTP 客户端，它是异步的且线程安全的
-                p_result = await remote_session_manager.request(
-                    token, "POST", "/index.php", params=p_params, data=p_data
-                )
-                
-                if p_result and p_result.get("code") == 0:
-                    products = []
-                    for p_item in p_result.get("data", []):
-                        name = p_item.get("name", "")
-                        # 拼音转换
-                        full_pinyin = "".join(lazy_pinyin(name))
-                        first_letters = "".join([p[0] for p in lazy_pinyin(name, style=Style.FIRST_LETTER)])
-                        products.append({
-                            "id": str(p_item.get("goods_id", "")),
-                            "name": name,
-                            "spec": p_item.get("spec", ""),
-                            "unit": p_item.get("unit", ""),
-                            "category": p_item.get("category_name", "") or "未分类",
-                            "price": p_item.get("price", ""),
-                            "pinyin": full_pinyin,
-                            "py": first_letters,
-                        })
-                    # 写入缓存
-                    await redis_manager.set(cache_key, json.dumps(products, ensure_ascii=False), ex=3600)
-                    logger.info(f"[Preload] Cached {len(products)} products for {target_id}")
-            except Exception as e:
-                logger.warning(f"[Preload] Failed for {target_id}: {e}")
+            async with sem:
+                try:
+                    cache_key = f"products:{session.genus_id}:{target_id}"
+                    if await redis_manager.get(cache_key):
+                        return 
+                    
+                    logger.info(f"[Preload] Fetching products for partner {target_id}")
+                    # 构造请求
+                    p_params = {"op": "goods"}
+                    p_data = {}
+                    if session.user_type == "purchaser":
+                        p_data["supplier_id"] = target_id
+                    else:
+                        p_params["purchaser_id"] = target_id
+                    
+                    p_result = await remote_session_manager.request(
+                        token, "POST", "/index.php", params=p_params, data=p_data
+                    )
+                    
+                    if p_result and p_result.get("code") == 0:
+                        products = []
+                        
+                        # 在线程池中执行耗时的拼音转换
+                        loop = asyncio.get_running_loop()
+                        
+                        def process_products(items):
+                            processed = []
+                            for p_item in items:
+                                name = p_item.get("name", "")
+                                # 拼音转换 (CPU 密集型)
+                                full_pinyin = "".join(lazy_pinyin(name))
+                                first_letters = "".join([p[0] for p in lazy_pinyin(name, style=Style.FIRST_LETTER)])
+                                processed.append({
+                                    "id": str(p_item.get("goods_id", "")),
+                                    "name": name,
+                                    "spec": p_item.get("spec", ""),
+                                    "unit": p_item.get("unit", ""),
+                                    "category": p_item.get("category_name", "") or "未分类",
+                                    "price": p_item.get("price", ""),
+                                    "pinyin": full_pinyin,
+                                    "py": first_letters,
+                                })
+                            return processed
+
+                        products = await loop.run_in_executor(
+                            None, 
+                            partial(process_products, p_result.get("data", []))
+                        )
+
+                        # 写入 Redis 缓存
+                        await redis_manager.set(cache_key, json.dumps(products, ensure_ascii=False), ex=3600)
+                        logger.info(f"[Preload] Cached {len(products)} products for {target_id}")
+                        
+                except Exception as e:
+                    logger.warning(f"[Preload] Failed for {target_id}: {e}")
 
         # 启动后台任务
         for p in partners:
@@ -256,9 +276,12 @@ async def get_restaurants(partnerId: Optional[str] = None, authorization: Option
     if not token:
         raise HTTPException(status_code=401, detail="未登录")
     
-    session = remote_session_manager.get_session(token)
+    session = await remote_session_manager.get_session(token)
     if not session:
         raise HTTPException(status_code=401, detail="登录已过期")
+    
+    # ... (rest of the function)
+
     
     # 构造请求参数
     params = {"op": "warehouse"}
@@ -293,7 +316,7 @@ async def get_order_types(partnerId: Optional[str] = None, authorization: Option
     if not token:
         raise HTTPException(status_code=401, detail="未登录")
     
-    session = remote_session_manager.get_session(token)
+    session = await remote_session_manager.get_session(token)
     if not session:
         raise HTTPException(status_code=401, detail="登录已过期")
     
@@ -341,7 +364,7 @@ async def get_products_list(partnerId: Optional[str] = None, authorization: Opti
     if not token:
         raise HTTPException(status_code=401, detail="未登录")
     
-    session = remote_session_manager.get_session(token)
+    session = await remote_session_manager.get_session(token)
     if not session:
         raise HTTPException(status_code=401, detail="登录已过期")
         
@@ -387,25 +410,33 @@ async def get_products_list(partnerId: Optional[str] = None, authorization: Opti
     if not result or result.get("code") != 0:
         return {"success": False, "data": [], "message": "获取失败"}
         
-    # 处理数据：添加拼音
-    products = []
-    for item in result.get("data", []):
-        name = item.get("name", "")
-        # 生成简拼 (szst) 和 全拼 (shuzhishitang)
-        # lazy_pinyin 返回 ['shu', 'zhi']
-        full_pinyin = "".join(lazy_pinyin(name))
-        first_letters = "".join([p[0] for p in lazy_pinyin(name, style=Style.FIRST_LETTER)])
-        
-        products.append({
-            "id": str(item.get("goods_id", "")),
-            "name": name,
-            "spec": item.get("spec", ""),
-            "unit": item.get("unit", ""),
-            "category": item.get("category_name", "") or "未分类",
-            "price": item.get("price", ""),
-            "pinyin": full_pinyin,
-            "py": first_letters, # 简拼
-        })
+    # 处理数据：添加拼音 (使用线程池)
+    loop = asyncio.get_running_loop()
+    
+    def process_products(items):
+        processed = []
+        for item in items:
+            name = item.get("name", "")
+            # 拼音转换
+            full_pinyin = "".join(lazy_pinyin(name))
+            first_letters = "".join([p[0] for p in lazy_pinyin(name, style=Style.FIRST_LETTER)])
+            
+            processed.append({
+                "id": str(item.get("goods_id", "")),
+                "name": name,
+                "spec": item.get("spec", ""),
+                "unit": item.get("unit", ""),
+                "category": item.get("category_name", "") or "未分类",
+                "price": item.get("price", ""),
+                "pinyin": full_pinyin,
+                "py": first_letters, # 简拼
+            })
+        return processed
+
+    products = await loop.run_in_executor(
+        None, 
+        partial(process_products, result.get("data", []))
+    )
     
     # 写入 Redis 缓存 (3600秒 = 1小时)
     try:
@@ -420,17 +451,12 @@ async def get_products_list(partnerId: Optional[str] = None, authorization: Opti
 async def sync_products(req: SyncRequest, authorization: Optional[str] = Header(None)):
     """
     同步商品库并向量化
-    
-    流程：
-    1. 调用远端 API 获取商品列表
-    2. 转换为知识库格式
-    3. 重新向量化
     """
     token = extract_token(authorization)
     if not token:
         raise HTTPException(status_code=401, detail="未登录")
     
-    session = remote_session_manager.get_session(token)
+    session = await remote_session_manager.get_session(token)
     if not session:
         raise HTTPException(status_code=401, detail="登录已过期")
     
@@ -473,7 +499,8 @@ async def sync_products(req: SyncRequest, authorization: Optional[str] = Header(
     
     # 重载知识库
     try:
-        await knowledge_base.reload_from_remote(products)
+        # 传入 partnerId 以便区分不同客户的商品库（如果需要）
+        await knowledge_base.reload_from_remote(products, partner_id=req.partnerId)
         logger.info(f"[SyncProducts] Knowledge base reloaded with {len(products)} products")
     except Exception as e:
         logger.error(f"[SyncProducts] Reload error: {e}")
@@ -497,7 +524,7 @@ async def submit_order(req: SubmitOrderRequest, authorization: Optional[str] = H
     if not token:
         raise HTTPException(status_code=401, detail="未登录")
     
-    session = remote_session_manager.get_session(token)
+    session = await remote_session_manager.get_session(token)
     if not session:
         raise HTTPException(status_code=401, detail="登录已过期")
     
@@ -522,9 +549,10 @@ async def submit_order(req: SubmitOrderRequest, authorization: Optional[str] = H
             }
     
     # 2. 构造远端 API 请求数据
+    # 确保所有 ID 字段都是字符串
     payload = {
-        "order_type": req.orderTypeId,
-        "warehouse_id": req.restaurantId,
+        "order_type": str(req.orderTypeId),
+        "warehouse_id": str(req.restaurantId),
         "collect_date": req.date.replace("-", "/"), # 确保格式为 YYYY/MM/DD
         "remark": req.remark or "",
         "item": []
@@ -533,12 +561,12 @@ async def submit_order(req: SubmitOrderRequest, authorization: Optional[str] = H
     # 根据用户类型填充 supplier_id / purchaser_id
     if session.user_type == "purchaser":
         # 学校登录: supplier_id 为必填 (选中的配送商), purchaser_id 为自己
-        payload["supplier_id"] = req.partnerId
-        payload["purchaser_id"] = session.genus_id
+        payload["supplier_id"] = str(req.partnerId)
+        payload["purchaser_id"] = str(session.genus_id)
     else:
         # 配送商登录: purchaser_id 为必填 (选中的学校), supplier_id 为自己
-        payload["purchaser_id"] = req.partnerId
-        payload["supplier_id"] = session.genus_id
+        payload["purchaser_id"] = str(req.partnerId)
+        payload["supplier_id"] = str(session.genus_id)
         
     # 填充商品列表
     for item in req.items:
@@ -555,7 +583,7 @@ async def submit_order(req: SubmitOrderRequest, authorization: Optional[str] = H
     result = await remote_session_manager.request(
         token, "POST", "/index.php",
         params={"op": "goods_order_set"},
-        data=payload # request方法会自动处理json/data
+        json_body=payload # 使用 json_body 发送 JSON 请求
     )
     
     logger.info(f"[SubmitOrder] Remote response: {result}")

@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.core.logger import app_logger as logger
 from app.core.events import startup_event, shutdown_event
 from app.core.redis import redis_manager
+from app.api import endpoints, websocket, skills, remote_api
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

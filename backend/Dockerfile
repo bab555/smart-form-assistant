@@ -22,6 +22,7 @@ RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debia
   build-essential \
   libgl1 \
   libglib2.0-0 \
+  poppler-utils \
   && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
   && rm -rf /var/lib/apt/lists/*
 
