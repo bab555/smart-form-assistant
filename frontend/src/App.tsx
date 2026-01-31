@@ -32,9 +32,9 @@ const App: React.FC = () => {
     const init = async () => {
       setIsChecking(true);
       
-      // A. 优先检查 URL 参数 (方便调试: ?access_token=xxx)
+      // A. 优先检查 URL 参数 (方便调试: ?access_token=xxx 或 ?token=xxx)
       const params = new URLSearchParams(window.location.search);
-      const urlToken = params.get('access_token');
+      const urlToken = params.get('access_token') || params.get('token');
       
       if (urlToken) {
         console.log('[App] Found token in URL, attempting SSO...');

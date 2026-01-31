@@ -528,14 +528,21 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
       restaurant: '',
       orderTypeId: '',
       orderType: '',
+      date: table.metadata.date // 保留日期
     });
+
+    // 清空商品库缓存，避免显示旧客户的商品
+    setProducts([]);
+    setCategories([]);
+    setProductSearch('');
+    setActiveCategory('全部');
 
     // 如果是配送商模式（需要选择客户），选择客户后重新加载关联数据
     if (clientId) {
         // 并行加载
         void loadRestaurants(clientId);
         void loadOrderTypes(clientId);
-        // 自动触发商品库同步（或者检查是否需要同步）
+        // 自动触发商品库同步（后端会重载 KnowledgeBase）
         void syncProducts(clientId);
     }
   };
