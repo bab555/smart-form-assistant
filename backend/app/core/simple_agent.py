@@ -212,25 +212,32 @@ class SimpleAgent:
 【任务】
 这是一份用户上传的文件内容（见下文）。请分析用户的订单需求。
 
-【处理规则】
-1. **智能拆分**：如果内容包含多个日期或多个客户的订单，请拆分成多个表格。
-2. **内容解析**：
+【关键处理流程】 (必须严格按此顺序执行)
+1. **元数据检查与分表判定 (Priority High)**：
+   - 首先，仔细检查文件内容中是否包含**日期**、**单位/部门**、**食堂/餐厅**等元数据。
+   - 如果发现多个不同的日期、单位或食堂，**必须**将它们拆分成多个独立的表格。
+   - 不要将不同日期或不同单位的数据混在一个表格中。
+   - 每个新表格必须使用 `{"__new_table__": "表名"}` 指令创建，表名应包含区分信息（如“1月1日早餐”、“教工食堂午餐”）。
+
+2. **内容解析与提取**：
    - 识别“食谱”：如“红烧肉”，需拆解为食材（五花肉、酱油等）。
    - 识别“口语”：如“明天要十斤土豆”，提取为 {"识别商品": "土豆", "数量": 10, "单位": "斤"}。
    - **表格数据**：如果输入是 Markdown 表格，请逐行提取数据。
-3. **合并同类项**：相同商品请合并数量。
+
+3. **合并同类项**：在同一个表格内，相同商品请合并数量。
 
 【One-Shot Example (示例)】
 输入文件内容:
-| 商品名称 | 数量 | 单位 |
-| --- | --- | --- |
-| 土豆 | 10 | 斤 |
-| 西红柿 | 5 | 斤 |
+=== 2023-10-01 教工食堂 ===
+土豆 10斤
+=== 2023-10-02 学生食堂 ===
+西红柿 20斤
 
 输出 JSON Lines:
-{"__new_table__": "新表格"}
+{"__new_table__": "2023-10-01 教工食堂"}
 {"识别商品": "土豆", "数量": 10, "单位": "斤", "规格": "", "备注": ""}
-{"识别商品": "西红柿", "数量": 5, "单位": "斤", "规格": "", "备注": ""}
+{"__new_table__": "2023-10-02 学生食堂"}
+{"识别商品": "西红柿", "数量": 20, "单位": "斤", "规格": "", "备注": ""}
 
 【输出格式】
 严格使用 JSON Lines 格式，每行一个对象：
@@ -442,6 +449,7 @@ class SimpleAgent:
                             yield self._update_cell(tid, rid, "规格", prod.spec or "")
                             yield self._update_cell(tid, rid, "单位", prod.unit or "")
                             yield self._update_cell(tid, rid, "__order_status", "exact")
+                            yield self._update_cell(tid, rid, "__goods_id", str(prod.id))
                             continue
                     
                     # 无法匹配
@@ -459,6 +467,7 @@ class SimpleAgent:
                         yield self._update_cell(tid, rid, "规格", res.product.spec or "")
                         yield self._update_cell(tid, rid, "单位", res.product.unit or "")
                         yield self._update_cell(tid, rid, "__order_status", "exact")
+                        yield self._update_cell(tid, rid, "__goods_id", str(res.product.id))
                         continue
                     
                     # 模糊匹配

@@ -14,16 +14,17 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.logger import app_logger as logger
 from app.core.events import startup_event, shutdown_event
-from app.api import endpoints, websocket, skills, remote_api
-
+from app.core.redis import redis_manager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动
     await startup_event(app)
+    await redis_manager.init_redis()
     yield
     # 关闭
+    await redis_manager.close()
     await shutdown_event(app)
 
 

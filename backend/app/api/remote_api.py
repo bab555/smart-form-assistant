@@ -83,12 +83,12 @@ def extract_token(authorization: Optional[str]) -> Optional[str]:
 @router.post("/auth/login", response_model=LoginResponse)
 async def login(req: LoginRequest):
     """用户登录"""
-    result = await remote_session_manager.login(req.username, req.password)
+    success, data, message = await remote_session_manager.login(req.username, req.password)
     
-    if result:
-        return LoginResponse(success=True, data=result)
+    if success:
+        return LoginResponse(success=True, data=data)
     else:
-        return LoginResponse(success=False, message="用户名或密码错误")
+        return LoginResponse(success=False, message=message or "用户名或密码错误")
 
 
 @router.post("/auth/sso", response_model=LoginResponse)
@@ -189,6 +189,62 @@ async def get_partners(authorization: Optional[str] = Header(None)):
             "name": item.get("name", ""),
         })
     
+    # ========== 预加载优化：后台异步加载所有客户的商品库 ==========
+    try:
+        # 辅助函数：单个预加载
+        async def preload_one(target_id: str):
+            try:
+                cache_key = f"products:{session.genus_id}:{target_id}"
+                # 如果缓存已存在且较新（例如剩余时间 > 30分钟），则跳过
+                # 但 redis.get 无法看时间，为了简单我们只看是否存在
+                if await redis_manager.get(cache_key):
+                    return 
+                
+                logger.info(f"[Preload] Fetching products for partner {target_id}")
+                # 构造请求
+                p_params = {"op": "goods"}
+                p_data = {}
+                if session.user_type == "purchaser":
+                    p_data["supplier_id"] = target_id
+                else:
+                    p_params["purchaser_id"] = target_id
+                
+                # 注意：request 方法内部使用了 HTTP 客户端，它是异步的且线程安全的
+                p_result = await remote_session_manager.request(
+                    token, "POST", "/index.php", params=p_params, data=p_data
+                )
+                
+                if p_result and p_result.get("code") == 0:
+                    products = []
+                    for p_item in p_result.get("data", []):
+                        name = p_item.get("name", "")
+                        # 拼音转换
+                        full_pinyin = "".join(lazy_pinyin(name))
+                        first_letters = "".join([p[0] for p in lazy_pinyin(name, style=Style.FIRST_LETTER)])
+                        products.append({
+                            "id": str(p_item.get("goods_id", "")),
+                            "name": name,
+                            "spec": p_item.get("spec", ""),
+                            "unit": p_item.get("unit", ""),
+                            "category": p_item.get("category_name", "") or "未分类",
+                            "price": p_item.get("price", ""),
+                            "pinyin": full_pinyin,
+                            "py": first_letters,
+                        })
+                    # 写入缓存
+                    await redis_manager.set(cache_key, json.dumps(products, ensure_ascii=False), ex=3600)
+                    logger.info(f"[Preload] Cached {len(products)} products for {target_id}")
+            except Exception as e:
+                logger.warning(f"[Preload] Failed for {target_id}: {e}")
+
+        # 启动后台任务
+        for p in partners:
+            asyncio.create_task(preload_one(p["id"]))
+            
+        logger.info(f"[Partners] Triggered preload for {len(partners)} partners")
+    except Exception as e:
+        logger.error(f"[Partners] Preload trigger failed: {e}")
+    
     logger.info(f"[Partners] parsed {len(partners)} items")
     return {"success": True, "data": partners}
 
@@ -267,11 +323,13 @@ async def get_order_types(partnerId: Optional[str] = None, authorization: Option
 
 
 from pypinyin import lazy_pinyin, Style
+import json
+from app.core.redis import redis_manager
 
 # ... 之前的代码 ...
 
-# 简单的内存缓存：partner_id -> {timestamp, data}
-_products_cache = {}
+# 移除内存缓存
+# _products_cache = {}
 
 @router.get("/data/products")
 async def get_products_list(partnerId: Optional[str] = None, authorization: Optional[str] = Header(None)):
@@ -299,14 +357,17 @@ async def get_products_list(partnerId: Optional[str] = None, authorization: Opti
         if not target_id:
              return {"success": True, "data": []}
 
-    # 检查缓存 (有效期 5 分钟)
-    import time
-    cache_key = f"{session.genus_id}_{target_id}"
-    now = time.time()
-    if cache_key in _products_cache:
-        cached = _products_cache[cache_key]
-        if now - cached["timestamp"] < 300: # 5分钟
-            return {"success": True, "data": cached["data"]}
+    # 检查 Redis 缓存 (有效期 1 小时)
+    cache_key = f"products:{session.genus_id}:{target_id}"
+    
+    cached_data = await redis_manager.get(cache_key)
+    if cached_data:
+        try:
+            products = json.loads(cached_data)
+            logger.info(f"[Products] Cache hit for {cache_key}, count={len(products)}")
+            return {"success": True, "data": products}
+        except Exception as e:
+            logger.error(f"[Products] Cache decode error: {e}")
 
     # 调用远端 API
     params = {"op": "goods"}
@@ -346,11 +407,11 @@ async def get_products_list(partnerId: Optional[str] = None, authorization: Opti
             "py": first_letters, # 简拼
         })
     
-    # 写入缓存
-    _products_cache[cache_key] = {
-        "timestamp": now,
-        "data": products
-    }
+    # 写入 Redis 缓存 (3600秒 = 1小时)
+    try:
+        await redis_manager.set(cache_key, json.dumps(products, ensure_ascii=False), ex=3600)
+    except Exception as e:
+        logger.error(f"[Products] Cache set error: {e}")
     
     return {"success": True, "data": products}
 

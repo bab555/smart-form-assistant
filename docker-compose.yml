@@ -9,11 +9,35 @@ services:
       - "8151:8000"
     env_file:
       - ./backend/.env
+    environment:
+      - REDIS_HOST=smart-form-redis  # 明确指定容器名，而不是 generic 的 redis
+      - REDIS_PORT=6379              # 容器内部依然是 6379，不需要改，因为是在 docker 网络内部通信
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
+    depends_on:
+      - redis
     networks:
       - app-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: smart-form-redis
+    restart: always
+    ports:
+      - "16379:6379"  # 映射到宿主机奇葩端口，防止冲突
+    volumes:
+      - redis_data:/data
+    command: redis-server --port 6379 --appendonly yes
+    networks:
+      - app-network
+
+volumes:
+  redis_data:
+
+networks:
+  app-network:
+    driver: bridge
 
   frontend:
     build: ./frontend

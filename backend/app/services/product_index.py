@@ -392,37 +392,78 @@ class FastProductIndex:
         category_filter: Set[int] = None
     ) -> List[Tuple[Product, float]]:
         """
-        模糊搜索（编辑距离）
+        模糊搜索（编辑距离 + 增强逻辑）
         
-        为了性能，只在候选集中搜索
+        优化策略：
+        1. 允许一定程度的字数差异（包含/被包含）
+        2. 降低短词匹配的门槛
+        3. 编辑距离加权
         """
         results = []
+        query_len = len(query)
         
-        # 先用字符交集缩小范围
+        # 候选集筛选优化：
+        # 只要包含任意一个字符即可作为候选（之前是交集，太严了），但在计算时加重惩罚
+        # 为了性能，还是得限制候选集大小
         candidates = set()
+        
+        # 策略 A: 字符交集 (快速筛选)
+        char_matches = defaultdict(int)
         for char in query:
             if char in self.char_index:
-                candidates.update(self.char_index[char])
+                for pid in self.char_index[char]:
+                    char_matches[pid] += 1
+        
+        # 筛选出至少匹配 50% 字符的候选
+        threshold = max(1, int(query_len * 0.5))
+        for pid, count in char_matches.items():
+            if count >= threshold:
+                candidates.add(pid)
         
         if category_filter:
             candidates = candidates & category_filter
         
         # 限制候选数量
-        candidates = list(candidates)[:500]
+        candidate_list = list(candidates)[:800]
         
-        for pid in candidates:
+        for pid in candidate_list:
             if pid not in self.products:
                 continue
             product = self.products[pid]
+            prod_name = product.name
+            prod_len = len(prod_name)
             
-            # 计算编辑距离
-            distance = self._levenshtein_distance(query, product.name)
-            max_len = max(len(query), len(product.name))
+            # 1. 包含关系 (Query 包含 Name 或 Name 包含 Query)
+            # 这在字数不一致时非常有用（如 "有机大土豆" vs "土豆"）
+            is_contained = False
+            if query_len > prod_len and prod_name in query:
+                # Query 长，Name 短：比如 query="新鲜有机土豆", name="土豆"
+                # 分数 = 名字长度占比 (越长越匹配)
+                score = 0.85 * (prod_len / query_len)
+                results.append((product, score))
+                is_contained = True
+            elif prod_len > query_len and query in prod_name:
+                # Name 长，Query 短：比如 query="土豆", name="高山小土豆"
+                score = 0.85 * (query_len / prod_len)
+                results.append((product, score))
+                is_contained = True
+            
+            if is_contained:
+                continue
+
+            # 2. 编辑距离 (Levenshtein)
+            distance = self._levenshtein_distance(query, prod_name)
+            max_len = max(query_len, prod_len)
             
             if max_len > 0:
                 similarity = 1 - (distance / max_len)
-                if similarity > 0.5:  # 至少 50% 相似
-                    results.append((product, similarity * 0.7))  # 模糊匹配打折
+                
+                # 动态阈值：
+                # 短词要求更严格，长词可以宽容
+                min_sim = 0.4 if max_len > 4 else 0.6
+                
+                if similarity >= min_sim:
+                    results.append((product, similarity * 0.7))
         
         # 按相似度排序
         results.sort(key=lambda x: x[1], reverse=True)

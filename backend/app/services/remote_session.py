@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 import secrets
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass, field
 import httpx
 
@@ -50,17 +50,19 @@ class RemoteSessionManager:
         raw = f"{username}:{timestamp}:{random_part}"
         return hashlib.sha256(raw.encode()).hexdigest()
     
-    async def login(self, username: str, password: str) -> Optional[Dict[str, Any]]:
+    async def login(self, username: str, password: str) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
         """
         用户登录
         
         Returns:
-            成功返回用户信息，失败返回 None
+            (success, data, message)
         """
+        logger.info(f"[RemoteSession] Login attempt for user: {username}")
         # 创建新的 HTTP Client（带 Cookie 支持）
         client = httpx.AsyncClient(timeout=30.0)
         
         try:
+            logger.debug(f"[RemoteSession] Sending login request to {REMOTE_API_BASE}/login.php")
             # 调用远端登录接口
             response = await client.post(
                 f"{REMOTE_API_BASE}/login.php",
@@ -68,12 +70,22 @@ class RemoteSessionManager:
                 data={"username": username, "password": password}
             )
             
-            result = response.json()
-            logger.info(f"[RemoteSession] Login response: {result}")
+            logger.debug(f"[RemoteSession] Remote response status: {response.status_code}")
+            
+            try:
+                result = response.json()
+            except Exception as e:
+                logger.error(f"[RemoteSession] Failed to parse JSON: {response.text[:200]}...")
+                await client.aclose()
+                return False, None, f"远端响应异常: {str(e)}"
+
+            logger.info(f"[RemoteSession] Login response code: {result.get('code')}")
             
             if result.get("code") != 0:
+                msg = result.get("msg") or result.get("message") or "登录失败"
+                logger.warning(f"[RemoteSession] Login failed for {username}: {msg}")
                 await client.aclose()
-                return None
+                return False, None, msg
             
             data = result.get("data", {})
             
@@ -94,20 +106,20 @@ class RemoteSessionManager:
             async with self._lock:
                 self._sessions[local_token] = session
             
-            logger.info(f"[RemoteSession] User logged in: {session.name} ({session.user_type})")
+            logger.info(f"[RemoteSession] User logged in successfully: {session.name} ({session.user_type})")
             
-            return {
+            return True, {
                 "userType": session.user_type,
                 "userId": session.user_id,
                 "genusId": session.genus_id,
                 "name": session.name,
                 "token": local_token,
-            }
+            }, None
             
         except Exception as e:
-            logger.error(f"[RemoteSession] Login error: {e}")
+            logger.error(f"[RemoteSession] Login exception: {e}", exc_info=True)
             await client.aclose()
-            return None
+            return False, None, f"系统错误: {str(e)}"
     
     async def login_by_token(self, remote_token: str) -> Optional[Dict[str, Any]]:
         """

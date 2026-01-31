@@ -449,6 +449,8 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
       updateCell(table.id, rowIndex, '订单商品', selectedProduct);
       updateCell(table.id, rowIndex, '单位', product.unit);
       updateCell(table.id, rowIndex, '规格', product.spec);
+      updateCell(table.id, rowIndex, '__goods_id', product.id); // 关键：立即写入ID，防止提交时丢失
+      updateCell(table.id, rowIndex, '__order_status', 'exact'); // 立即标记为已确认
       
       wsClient.send('apply_order_product', {
         table_id: table.id,
@@ -564,9 +566,14 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
   const checkUnprocessedRows = useCallback((rows: TableRow[]) => {
     const unprocessed: number[] = [];
     rows.forEach((row, index) => {
-      const status = (row as Record<string, unknown>).__order_status;
-      // 如果状态不是 'exact'（精确匹配），说明需要用户处理
-      if (status && status !== 'exact') {
+      const r = row as Record<string, unknown>;
+      const status = r.__order_status;
+      const goodsId = r.__goods_id;
+      
+      // 判定未处理的条件：
+      // 1. 状态不是 'exact'
+      // 2. 或者 缺少 goodsId (即便是 exact，没 ID 也是无效的)
+      if ((status && status !== 'exact') || !goodsId) {
         unprocessed.push(index + 1); // 行号从1开始显示
       }
     });
@@ -840,7 +847,7 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
       onClick: () => handleAddProduct(),
     },
     {
-      label: '删除选中行',
+      label: '删除最后一行',
       icon: <X size={14} />,
       onClick: () => {
         // 删除最后一行（或选中行，这里简化处理）

@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     # ========== 服务器配置 ==========
     HOST: str = "0.0.0.0"
     PORT: int = 8000
-    WORKERS: int = 4
-    RELOAD: bool = True
+    WORKERS: int = 32
+    RELOAD: bool = False  # 生产环境默认关闭 Reload
     LOG_LEVEL: str = "info"
     
     # ========== 阿里云凭证 ==========
@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     DB_USER: str = "root"
     DB_PASSWORD: str = ""
     DB_NAME: str = "smart_form_db"
+    
+    # ========== Redis 配置 ==========
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_PASSWORD: str = ""
+    REDIS_DB: int = 0
     
     # ========== 向量数据库 ==========
     FAISS_INDEX_PATH: str = "./data/vector_store.index"

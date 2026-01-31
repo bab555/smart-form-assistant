@@ -1,6 +1,7 @@
 # FastAPI Core
 fastapi
 uvicorn
+gunicorn
 python-multipart
 python-dotenv
 aiofiles
@@ -38,6 +39,7 @@ aiohttp
 # Database (Mock mode only)
 pymysql
 sqlalchemy
+redis
 
 # Utilities
 python-jose[cryptography]

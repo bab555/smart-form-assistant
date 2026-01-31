@@ -42,4 +42,4 @@ RUN mkdir -p /app/uploads /app/data /app/logs
 EXPOSE 8000
 
 # 启动命令
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["gunicorn", "main:app", "--workers", "32", "--threads", "4", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "300", "--keep-alive", "65", "--max-requests", "1000", "--max-requests-jitter", "50"]
