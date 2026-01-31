@@ -325,20 +325,20 @@ class KnowledgeBaseService:
         """
         return self.product_index.calibrate(raw_text, category)
     
-    async def reload_from_remote(self, products: List[Dict[str, Any]]) -> None:
+    async def reload_from_remote(self, products: List[Dict[str, Any]], partner_id: str = None) -> None:
         """
         从远端 API 数据重载商品库
         
         Args:
-            products: 商品列表，格式：
-                [{"id": "1", "name": "大白菜", "spec": "500g", "unit": "斤", "category": "蔬菜"}, ...]
+            products: 商品列表
+            partner_id: 客户ID
         """
-        logger.info(f"开始从远端数据重载商品库，共 {len(products)} 条")
+        logger.info(f"开始从远端数据重载商品库，共 {len(products)} 条 (partner_id={partner_id})")
         
-        # 清空现有索引
+        # 1. 彻底清空现有索引 (防止匹配到旧客户的商品)
         self.product_index = FastProductIndex()
         
-        # 导入商品
+        # 2. 重新构建索引
         for item in products:
             product = Product(
                 id=int(item.get("id", 0)) if item.get("id") else 0,
@@ -358,14 +358,14 @@ class KnowledgeBaseService:
             if product.name:
                 self.product_index.add_product(product)
         
-        # 保存缓存
-        self._save_index()
-        
-        # 更新全局实例
+        # 3. 更新全局引用
         global product_index
         product_index = self.product_index
         
-        logger.info(f"✅ 远端商品库重载完成，共 {self.product_index.total_count} 条")
+        # 4. 刷新缓存文件 (可选，视是否需要持久化当前客户状态而定)
+        # self._save_index() 
+        
+        logger.info(f"✅ 知识库重载完成，当前包含 {self.product_index.total_count} 条商品")
     
     async def batch_calibrate(
         self,

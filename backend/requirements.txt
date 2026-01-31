@@ -30,6 +30,7 @@ openpyxl
 xlrd>=2.0.1
 python-docx
 python-pptx
+pdf2image
 Pillow
 
 # HTTP Client
