@@ -32,7 +32,7 @@ async def websocket_endpoint(
     # 获取用户 ID（如果已登录）
     user_id = "anonymous"
     if token:
-        session = remote_session_manager.get_session(token)
+        session = await remote_session_manager.get_session(token)
         if session:
             user_id = session.user_id
             logger.info(f"[WS] Authenticated user: {user_id} ({session.name})")
