@@ -10,6 +10,7 @@
 
 import { create } from 'zustand';
 import { useAuthStore } from './useAuthStore';
+import { toast } from '../components/Toast';
 
 interface Partner {
   id: string;
@@ -73,18 +74,35 @@ export const useDataStore = create<DataState>((set) => ({
   productNames: [],
   
   loadPartners: async () => {
-    try {
-      const response = await fetch(`${API_BASE}/data/partners`, {
-        headers: getAuthHeader(),
-      });
-      const result = await response.json();
-      
-      if (result.success) {
-        set({ partners: result.data || [] });
+    let attempts = 0;
+    const maxAttempts = 3;
+    
+    while (attempts < maxAttempts) {
+      try {
+        const response = await fetch(`${API_BASE}/data/partners`, {
+          headers: getAuthHeader(),
+        });
+        const result = await response.json();
+        
+        if (result.success) {
+          set({ partners: result.data || [] });
+          return; // 成功获取，直接返回
+        }
+        // 如果 API 返回明确的失败，也视为一次尝试失败，继续重试
+        console.warn(`[LoadPartners] Attempt ${attempts + 1} failed:`, result.message);
+      } catch (error) {
+        console.error(`[LoadPartners] Attempt ${attempts + 1} error:`, error);
       }
-    } catch (error) {
-      console.error('Load partners error:', error);
+      
+      attempts++;
+      if (attempts < maxAttempts) {
+        // 等待后重试 (1s, 2s)
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+      }
     }
+    
+    // 3次尝试后仍失败，弹出提示
+    toast.error('获取客户列表失败 (3次重试无效)，请刷新页面或检查网络', 5000);
   },
   
   loadRestaurants: async (partnerId?: string) => {
@@ -176,6 +194,9 @@ export const useDataStore = create<DataState>((set) => ({
       }
     } catch (error) {
       console.error('Sync products error:', error);
+      // 增加错误反馈
+      toast.error('因为网络波动问题，调用失败，请重试');
+      
       set({ 
         isSyncing: false, 
         syncMessage: '网络错误，同步失败',

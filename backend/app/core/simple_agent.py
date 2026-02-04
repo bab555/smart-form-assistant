@@ -10,6 +10,7 @@
 import json
 import re
 import logging
+import asyncio
 from typing import Optional, Dict, Any, AsyncGenerator, List
 from collections import defaultdict
 from app.services.aliyun_llm import llm_service
@@ -96,7 +97,23 @@ class SimpleAgent:
 2. 每个商品行输出：{"识别商品": "xx", "数量": 1, "单位": "xx", "规格": "xx", "备注": ""}。备注字段必须留空("")。
 3. 如果图片包含手写文字（无论是否清晰），请在第一行输出：{"has_handwriting": true}。如果不包含，输出：{"has_handwriting": false}。
 4. 不要输出Markdown代码块，不要解释。"""
-                parsed_content = await llm_service.call_vl_model(image_data=file_data, prompt=vl_prompt)
+                
+                # 增加 120秒 超时控制
+                try:
+                    # 使用 asyncio.wait_for 设置超时
+                    # 注意：如果 llm_service.call_vl_model 是同步阻塞的，这里的超时可能无法精准中断，但能起到逻辑保护作用
+                    parsed_content = await asyncio.wait_for(
+                        llm_service.call_vl_model(image_data=file_data, prompt=vl_prompt),
+                        timeout=120.0
+                    )
+                except asyncio.TimeoutError:
+                    yield {"type": "message", "content": "❌ 图片识别超时（超过120秒），请压缩图片后重试，或检查网络连接。"}
+                    yield {"type": "state", "state": "idle"}
+                    return
+                except Exception as e:
+                    yield {"type": "message", "content": f"❌ 图片识别失败: {str(e)}"}
+                    yield {"type": "state", "state": "idle"}
+                    return
 
                 # ========== 手写样本采集 (Data Collection) ==========
                 try:

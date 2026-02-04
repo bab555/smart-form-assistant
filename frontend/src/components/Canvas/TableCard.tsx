@@ -1198,7 +1198,17 @@ export const TableCard: React.FC<TableCardProps> = ({ table, onCloseRequest }) =
         </div>
 
         {/* 编辑偏好按钮 */}
-        <button className="preference-btn" onClick={openPreferenceEditor} title="编辑偏好">
+        <button 
+          className={`preference-btn ${!table.metadata.customerId ? 'disabled' : ''}`} 
+          onClick={() => {
+            if (!table.metadata.customerId) {
+              openCustomerModal(table.id);
+              return;
+            }
+            openPreferenceEditor();
+          }} 
+          title={!table.metadata.customerId ? "请先选择客户" : "编辑偏好"}
+        >
           <Settings size={14} />
           <span>编辑偏好</span>
         </button>
